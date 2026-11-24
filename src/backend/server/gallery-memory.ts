@@ -10,15 +10,17 @@ import { GALLERY_ROOT, safeName, safeFid, mediaKind, mediaDate, mediaTags, safeT
 
 export const galleryMemoryRouter = new Hono()
 // Only one Quark page per step. No timers/cron or image/video downloads on the server.
-const DAILY_PAGES = 120, MAX_PAGES = 1000, PAGE_SIZE = 40, LEASE_MS = 90000
+const DAILY_PAGES = 80, MAX_PAGES = 1000, PAGE_SIZE = 48, LEASE_MS = 90000, AUTO_REFRESH_MS = 24 * 60 * 60 * 1000
 const S="private_gallery_state", Q="private_gallery_queue", I="private_gallery_items"
 const schema = [
-  "CREATE TABLE IF NOT EXISTS "+S+" (scope TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 1, pages INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, day TEXT NOT NULL DEFAULT '', day_pages INTEGER NOT NULL DEFAULT 0, lease TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '')",
+  "CREATE TABLE IF NOT EXISTS "+S+" (scope TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 1, pages INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, day TEXT NOT NULL DEFAULT '', day_pages INTEGER NOT NULL DEFAULT 0, lease TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', completed_at INTEGER NOT NULL DEFAULT 0)",
   "CREATE TABLE IF NOT EXISTS "+Q+" (scope TEXT NOT NULL, epoch INTEGER NOT NULL, fid TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL, page INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope,epoch,fid))",
   "CREATE INDEX IF NOT EXISTS private_gallery_queue_next ON "+Q+"(scope,epoch,done,depth,fid)",
   "CREATE TABLE IF NOT EXISTS "+I+" (scope TEXT NOT NULL, epoch INTEGER NOT NULL, fid TEXT NOT NULL, full_path TEXT NOT NULL, folder TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, day TEXT NOT NULL, date_source TEXT NOT NULL, size INTEGER NOT NULL, tag TEXT NOT NULL, thumb_enc TEXT NOT NULL, shuffle INTEGER NOT NULL, PRIMARY KEY(scope,fid))",
   "CREATE INDEX IF NOT EXISTS private_gallery_date ON "+I+"(scope,epoch,day DESC,fid)",
   "CREATE INDEX IF NOT EXISTS private_gallery_shuffle ON "+I+"(scope,epoch,shuffle,fid)",
+  "CREATE INDEX IF NOT EXISTS private_gallery_stream ON "+I+"(scope,day DESC,fid)",
+  "CREATE INDEX IF NOT EXISTS private_gallery_stream_kind ON "+I+"(scope,kind,day DESC,fid)",
 ]
 const ok=(c:any,data:any)=>c.json({code:200,message:"success",data})
 const fail=(c:any,msg:string,status:400|401|403|409|429|500|503=400)=>c.json({code:status,message:msg,data:null},status)
@@ -53,9 +55,17 @@ async function context(c:any) {
 }
 type GalleryCtx=NonNullable<Awaited<ReturnType<typeof context>>>
 async function getState(g:GalleryCtx) {return await first(g.db,"SELECT * FROM "+S+" WHERE scope=?",g.scope)}
+// While refreshing, retain the preceding completed snapshot; hide missing media only after a complete pass.
+const visibleEpoch=(s:any)=>Math.max(1,Number(s.epoch)-(s.done?0:1))
 async function ensure(g:GalleryCtx) {
   let state:any
   try {state=await getState(g)}catch(e:any){if(!/no such table/i.test(String(e?.message||e)))throw e;await g.db.batch(schema.map(sql=>g.db.prepare(sql)));state=await getState(g)}
+  // Upgrade an existing installation without dropping its media index.
+  if((state && state.completed_at===undefined)||(!state && !(await rows(g.db,"PRAGMA table_info("+S+")")).some(x=>x.name==="completed_at"))){
+    try{await g.db.prepare("ALTER TABLE "+S+" ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0").run()}catch(e:any){if(!/duplicate column/i.test(String(e?.message||e)))throw e}
+    await g.db.batch(schema.slice(-2).map(sql=>g.db.prepare(sql)))
+    state=await getState(g)
+  }
   if(!state){
     await g.db.batch([
       query(g.db,"INSERT OR IGNORE INTO "+S+"(scope) VALUES(?)",g.scope),
@@ -68,7 +78,7 @@ async function ensure(g:GalleryCtx) {
 }
 function publicState(s:any) {
   const remaining=Math.max(0,DAILY_PAGES-(s.day===utcDay()?Number(s.day_pages):0))
-  return {pages:Number(s.pages),done:!!s.done,remaining_today:remaining,limited:remaining===0||Number(s.pages)>=MAX_PAGES,error:String(s.error||"")}
+  return {pages:Number(s.pages),done:!!s.done,remaining_today:remaining,limited:remaining===0||Number(s.pages)>=MAX_PAGES,error:String(s.error||""),completed_at:Number(s.completed_at||0),refresh_due:!!s.done&&remaining>0&&Date.now()-Number(s.completed_at||0)>=AUTO_REFRESH_MS,epoch:Number(s.epoch),syncing:Number(s.epoch)>1&&!s.done}
 }
 galleryMemoryRouter.use("*",async(c,next)=>{c.header("Cache-Control","no-store, private");c.header("Referrer-Policy","no-referrer");await next()})
 // D1 single-writer lease is acquired before the network call. Every mutation is guarded
@@ -94,7 +104,7 @@ galleryMemoryRouter.post("/step",async(c)=>{
   try{
     const task=await first(g.db,"SELECT * FROM "+Q+" WHERE scope=? AND epoch=? AND done=0 ORDER BY depth,fid LIMIT 1",g.scope,s.epoch)
     if(!task){
-      await query(g.db,"UPDATE "+S+" SET done=1,lease='',lease_until=0 WHERE scope=? AND lease=?",g.scope,lease).run()
+      await query(g.db,"UPDATE "+S+" SET done=1,completed_at=?,lease='',lease_until=0 WHERE scope=? AND lease=?",Date.now(),g.scope,lease).run()
       return ok(c,{...publicState(await getState(g)),worked:false})
     }
     if(!safeFid(task.fid)||!g.allowed(task.path))throw new Error("INDEX_SCOPE")
@@ -118,7 +128,7 @@ galleryMemoryRouter.post("/step",async(c)=>{
       ...bulk(g.db,Q,["scope","epoch","fid","path","depth"],children,"ON CONFLICT(scope,epoch,fid) DO NOTHING",g.scope,lease),
       ...bulk(g.db,I,["scope","epoch","fid","full_path","folder","name","kind","day","date_source","size","tag","thumb_enc","shuffle"],media,"ON CONFLICT(scope,fid) DO UPDATE SET epoch=excluded.epoch,full_path=excluded.full_path,folder=excluded.folder,name=excluded.name,kind=excluded.kind,day=excluded.day,date_source=excluded.date_source,size=excluded.size,tag=excluded.tag,thumb_enc=excluded.thumb_enc,shuffle=excluded.shuffle",g.scope,lease),
       query(g.db,"UPDATE "+Q+" SET page=page+1,done=? WHERE scope=? AND epoch=? AND fid=? AND "+guard,result.done?1:0,g.scope,s.epoch,task.fid,g.scope,lease),
-      query(g.db,"UPDATE "+S+" SET pages=pages+1,done=CASE WHEN EXISTS(SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND done=0) THEN 0 ELSE 1 END,lease='',lease_until=0,error='' WHERE scope=? AND lease=?",g.scope,s.epoch,g.scope,lease)
+      query(g.db,"UPDATE "+S+" SET pages=pages+1,done=CASE WHEN EXISTS(SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND done=0) THEN 0 ELSE 1 END,completed_at=CASE WHEN EXISTS(SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND done=0) THEN completed_at ELSE ? END,lease='',lease_until=0,error='' WHERE scope=? AND lease=?",g.scope,s.epoch,g.scope,s.epoch,Date.now(),g.scope,lease)
     ]
     await g.db.batch(batch)
     return ok(c,{...publicState(await getState(g)),worked:true,found:media.length})
@@ -131,9 +141,12 @@ galleryMemoryRouter.post("/step",async(c)=>{
 galleryMemoryRouter.post("/rescan",async(c)=>{
   const g=await context(c);if(!g)return fail(c,"无权操作相册索引。",403)
   const s=await ensure(g)
-  if(!s.done)return fail(c,"请先完成或继续当前扫描。",409)
+  const body=await c.req.json().catch(()=>({}))
+  if(!s.done)return ok(c,publicState(s))
+  if(publicState(s).remaining_today<=0)return fail(c,"今日同步额度已用完，下次打开相册会继续。",429)
+  if(body.automatic===true&&!publicState(s).refresh_due)return ok(c,publicState(s))
   const result=await query(g.db,"UPDATE "+S+" SET epoch=epoch+1,pages=0,done=0,error='',lease='',lease_until=0 WHERE scope=? AND epoch=? AND done=1 AND (lease='' OR lease_until<?)",g.scope,s.epoch,Date.now()).run()
-  if(!result.meta?.changes)return fail(c,"已有同步任务。",409)
+  if(!result.meta?.changes)return ok(c,publicState(await getState(g)))
   // Root insertion is also repaired by ensure() if this request is interrupted.
   await query(g.db,"INSERT OR IGNORE INTO "+Q+"(scope,epoch,fid,path,depth) SELECT scope,epoch,'0',?,0 FROM "+S+" WHERE scope=? AND pages=0",GALLERY_ROOT,g.scope).run()
   return ok(c,publicState(await getState(g)))
@@ -155,27 +168,49 @@ galleryMemoryRouter.get("/feed",async(c)=>{
     const nonce=String(c.req.query("seed")||"0").slice(0,32),seed=day+":"+nonce
     const pivot=stableHash(seed)
     const year=Number(day.slice(0,4)),ann=[1,2,3,4,5].map(i=>String(year-i)+day.slice(4))
-    const [recent,after,before,anniversary,count]=await Promise.all([
-      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch=? ORDER BY day DESC,fid LIMIT 40",g.scope,s.epoch),
-      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch=? AND shuffle>=? ORDER BY shuffle,fid LIMIT 48",g.scope,s.epoch,pivot),
-      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch=? AND shuffle<? ORDER BY shuffle,fid LIMIT 16",g.scope,s.epoch,pivot),
-      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch=? AND day IN (?,?,?,?,?) ORDER BY day DESC,fid LIMIT 24",g.scope,s.epoch,...ann),
-      first(g.db,"SELECT COUNT(*) AS n,COALESCE(SUM(CASE WHEN tag<>'' THEN 1 ELSE 0 END),0) AS tagged FROM "+I+" WHERE scope=? AND epoch=?",g.scope,s.epoch)
+    const minEpoch=visibleEpoch(s)
+    const [recent,after,before,anniversary,months]=await Promise.all([
+      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? ORDER BY day DESC,fid LIMIT 40",g.scope,minEpoch),
+      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND shuffle>=? ORDER BY shuffle,fid LIMIT 48",g.scope,minEpoch,pivot),
+      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND shuffle<? ORDER BY shuffle,fid LIMIT 16",g.scope,minEpoch,pivot),
+      rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND day IN (?,?,?,?,?) ORDER BY day DESC,fid LIMIT 24",g.scope,minEpoch,...ann),
+      rows(g.db,"SELECT substr(day,1,7) AS month,kind,COUNT(*) AS n,COALESCE(SUM(CASE WHEN tag<>'' THEN 1 ELSE 0 END),0) AS tagged FROM "+I+" WHERE scope=? AND epoch>=? GROUP BY month,kind ORDER BY month DESC",g.scope,minEpoch
     ])
     const groups=buildMemoryGroups(recent,after.concat(before),anniversary,seed)
     // Dedup across groups; no original media fetch.
     const cards=await Promise.all(groups.map(async group=>({id:group.id,title:group.title,subtitle:group.subtitle,items:await serialize(c,g,group.items)})))
-    return ok(c,{...publicState(s),total:Number(count?.n||0),tagged:Number(count?.tagged||0),cards})
+    return ok(c,{...publicState(s),total:months.reduce((n,m)=>n+Number(m.n||0),0),tagged:months.reduce((n,m)=>n+Number(m.tagged||0),0),months:months.map(m=>({month:m.month,kind:m.kind,count:Number(m.n)})),cards})
   }catch{return fail(c,"暂时无法读取相册索引，请稍后重试。",503)}
 })
+// Fixed sort expressions, all client inputs bound; stable keyset cursor avoids OFFSET scans.
+export function timelineQuery(params: {sort?:string;kind?:string;month?:string;q?:string;key?:string;fid?:string}) {
+  const sort=["new","old","name","size"].includes(params.sort||"")?params.sort:"new"
+  const col=sort==="name"?"name COLLATE NOCASE":sort==="size"?"size":sort==="old"?"CASE WHEN day='0000-00-00' THEN '9999-99-99' ELSE day END":"day"
+  const desc=sort==="new"||sort==="size"
+  const filters:string[]=[],args:any[]=[]
+  if(params.kind==="image"||params.kind==="video"){filters.push("kind=?");args.push(params.kind)}
+  if(params.month==="0000-00"){filters.push("day='0000-00-00'")}
+  else if(/^(19|20)\d{2}-(0[1-9]|1[0-2])$/.test(params.month||"")) {
+    const month=params.month!,y=Number(month.slice(0,4)),m=Number(month.slice(5))
+    const next=(m===12?y+1:y)+"-"+String(m===12?1:m+1).padStart(2,"0")
+    filters.push("day>=? AND day<?");args.push(month+"-01",next+"-01")
+  }
+  const q=String(params.q||"").trim().slice(0,120)
+  if(q){filters.push("(instr(lower(name),lower(?))>0 OR instr(lower(folder),lower(?))>0 OR instr(lower(tag),lower(?))>0)");args.push(q,q,q)}
+  const key=params.key
+  if(safeFid(params.fid)&&typeof key==="string"&&key.length<=512){
+    const valid=sort==="size"?/^\d{1,16}$/.test(key):sort==="name"?key.length>0:/^\d{4}-\d{2}-\d{2}$/.test(key)
+    if(valid){const value=sort==="size"?Number(key):key;filters.push("("+col+(desc?"<?":">?")+" OR ("+col+"=? AND fid>?))");args.push(value,value,params.fid)}
+  }
+  return {sort,where:filters.length?" AND "+filters.join(" AND "):"",args,order:col+(desc?" DESC":" ASC")+",fid ASC",key:(f:IndexedMedia)=>String(sort==="name"?f.name:sort==="size"?f.size:sort==="old"&&f.day==="0000-00-00"?"9999-99-99":f.day)}
+}
 galleryMemoryRouter.get("/timeline",async(c)=>{
   try{
     const g=await context(c);if(!g)return fail(c,"无权访问相册索引。",403)
     const s=await ensure(g)
-    const cursorDay=String(c.req.query("day")||""),fid=String(c.req.query("fid")||"")
-    const hasCursor=/^\d{4}-\d{2}-\d{2}$/.test(cursorDay)&&safeFid(fid)
-    const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch=? "+(hasCursor?"AND (day<? OR (day=? AND fid>?)) ":"")+"ORDER BY day DESC,fid LIMIT "+(PAGE_SIZE+1),g.scope,s.epoch,...(hasCursor?[cursorDay,cursorDay,fid]:[]))
+    const plan=timelineQuery({sort:c.req.query("sort"),kind:c.req.query("kind"),month:c.req.query("month"),q:c.req.query("q"),key:c.req.query("key")||c.req.query("day"),fid:c.req.query("fid")})
+    const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=?"+plan.where+" ORDER BY "+plan.order+" LIMIT "+(PAGE_SIZE+1),g.scope,visibleEpoch(s),...plan.args)
     const page=items.slice(0,PAGE_SIZE),last=page[page.length-1]
-    return ok(c,{items:await serialize(c,g,page),next:items.length>PAGE_SIZE&&last?{day:last.day,fid:last.fid}:null})
+    return ok(c,{items:await serialize(c,g,page),next:items.length>PAGE_SIZE&&last?{key:plan.key(last),fid:last.fid}:null,epoch:Number(s.epoch)})
   }catch{return fail(c,"暂时无法读取照片，请稍后重试。",503)}
 })

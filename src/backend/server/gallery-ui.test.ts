@@ -37,3 +37,15 @@ test("memory and timeline keep original gallery navigation and metadata-only API
   assert.match(galleryJs, /selected.full_path/)
   assert.doesNotThrow(() => new Script(galleryJs))
 })
+
+
+test("album defaults to indexed feed and renders a virtual continuous timeline",()=>{
+ assert.match(galleryHtml,/id="albumTab"/)
+ assert.match(galleryHtml,/id="folderTab"/)
+ assert.match(galleryHtml,/id="mediaMonth"/)
+ assert.match(galleryJs,/if\(location.hash\)showFiles/)
+ assert.match(galleryJs,/renderTimelineWindow/)
+ assert.match(galleryJs,/refresh_due/)
+ assert.match(galleryJs,/memNext/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

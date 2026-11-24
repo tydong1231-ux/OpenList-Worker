@@ -71,3 +71,18 @@ test("TV authorization tolerates a nested response and reports sanitized upstrea
     await assert.rejects(client.startLogin(), (e: any) => e.diagnostic === "UPSTREAM_NETWORK" && !e.message.includes("private"))
   } finally { globalThis.fetch = original }
 })
+
+
+test("post-scan errors identify the exact stage and recognize explicit QR expiration", async () => {
+  const original = globalThis.fetch
+  const client = new ClientQuarkUcTv({ variant: "quark", refresh_token: "" })
+  try {
+    globalThis.fetch = (async () => Response.json({ status: -1, errno: 11002, error_info: "授权码Code二维码过期" }, { status: 400 })) as typeof fetch
+    await assert.rejects(client.completeLogin("example-query"), (e: any) => e.diagnostic === "QR_EXPIRED")
+    globalThis.fetch = (async () => Response.json({ status: -1, errno: 11002, error_info: "等待确认" }, { status: 400 })) as typeof fetch
+    await assert.rejects(client.completeLogin("example-query"), (e: any) => e.diagnostic === "SCAN_PENDING")
+    globalThis.fetch = (async () => Response.json({ status: -1, errno: 11002, error_info: "unknown detail" }, { status: 400 })) as typeof fetch
+    await assert.rejects(client.completeLogin("example-query"), (e: any) => e.diagnostic === "GET_CODE_UPSTREAM_HTTP_400_STATUS_-1_ERRNO_11002")
+    await assert.rejects(client.verifyLogin(), (e: any) => e.diagnostic === "VERIFY_UPSTREAM_HTTP_400_STATUS_-1_ERRNO_11002")
+  } finally { globalThis.fetch = original }
+})

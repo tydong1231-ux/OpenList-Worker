@@ -107,6 +107,9 @@ quarkTvSetupRouter.post("/finish", async (c) => {
     await client.verifyLogin()
   } catch (e: any) {
     const reason = diagnostic(e, "QR_COMPLETE_FAILED")
+    if (reason === "SCAN_PENDING") {
+      return c.json({ code: 202, message: "等待手机扫码确认", data: { diagnostic: reason } }, 202)
+    }
     console.warn("[QuarkTV] QR completion failed", reason)
     const message = e instanceof QuarkTvError ? e.message : "授权未完成，请确认扫码并重试"
     return c.json({ code: 400, message: message + " [" + reason + "]", data: { diagnostic: reason } }, 400)

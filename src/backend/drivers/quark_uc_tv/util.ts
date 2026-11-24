@@ -183,7 +183,18 @@ export class ClientQuarkUcTv {
     const status = numericStatus(data.status)
     const errno = numericStatus(data.errno)
     if (!resp.ok || Number(data.status) >= 400 || Number(data.status) < 0 || (data.errno !== undefined && Number(data.errno) !== 0)) {
-      throw new QuarkTvError("UPSTREAM_HTTP_" + resp.status + "_STATUS_" + status + "_ERRNO_" + errno, "夸克接口拒绝请求")
+      const detail = [data.error_info, (data as any).agent_msg].filter(v => typeof v === "string").join(" ").toLowerCase()
+      // Only classify recognized upstream descriptions, never echo credentials or raw response bodies.
+      if (pathname === "/oauth/code") {
+        if (/过期|已失效|expired|expiration/.test(detail)) {
+          throw new QuarkTvError("QR_EXPIRED", "夸克授权二维码已过期，请生成新二维码")
+        }
+        if (/未扫码|未扫描|等待扫码|未确认|等待确认|未授权|pending|not scanned|not confirmed|waiting for/.test(detail)) {
+          throw new QuarkTvError("SCAN_PENDING", "等待手机夸克 App 扫码并确认授权")
+        }
+      }
+      const hint = /签名|signature/.test(detail) ? "（签名校验失败）" : /二维码|qrcode|qr code/.test(detail) ? "（二维码会话异常）" : /query.?token|查询令牌/.test(detail) ? "（查询令牌异常）" : /access.?token|访问令牌/.test(detail) ? "（访问令牌异常）" : ""
+      throw new QuarkTvError("UPSTREAM_HTTP_" + resp.status + "_STATUS_" + status + "_ERRNO_" + errno, "夸克接口拒绝请求" + hint)
     }
     return data as T
   }
@@ -206,18 +217,36 @@ export class ClientQuarkUcTv {
   }
 
   async completeLogin(queryToken: string): Promise<void> {
-    const r = await this.request<any>("/oauth/code", "GET", {
-      client_id: this.conf.clientID, scope: "netdisk", query_token: queryToken,
-    }, false, false)
+    let r: any
+    try {
+      r = await this.request<any>("/oauth/code", "GET", {
+        client_id: this.conf.clientID, scope: "netdisk", query_token: queryToken,
+      }, false, false)
+    } catch (e) {
+      if (e instanceof QuarkTvError && e.diagnostic !== "SCAN_PENDING" && e.diagnostic !== "QR_EXPIRED") {
+        throw new QuarkTvError("GET_CODE_" + e.diagnostic, "获取扫码授权码失败：" + e.message)
+      }
+      throw e
+    }
     const code = typeof r.code === "string" ? r.code : objectData(r.data).code
     if (typeof code !== "string" || !code) {
       throw new QuarkTvError("SCAN_PENDING", "请先扫码并确认授权")
     }
-    await this.exchangeToken({ code })
+    try {
+      await this.exchangeToken({ code })
+    } catch (e) {
+      if (e instanceof QuarkTvError) throw new QuarkTvError("EXCHANGE_" + e.diagnostic, "交换授权凭证失败：" + e.message)
+      throw e
+    }
   }
 
   async verifyLogin(): Promise<void> {
-    await this.request("/user", "GET", { method: "user_info" })
+    try {
+      await this.request("/user", "GET", { method: "user_info" })
+    } catch (e) {
+      if (e instanceof QuarkTvError) throw new QuarkTvError("VERIFY_" + e.diagnostic, "验证夸克账号失败：" + e.message)
+      throw e
+    }
   }
 
   private async refreshToken(): Promise<void> {

@@ -184,10 +184,10 @@ const serveGallery = (c: any) => {
 app.get("/", serveGallery)
 app.get("/@gallery", serveGallery)
 app.get("/@gallery.css", (c) => c.body(galleryCss, 200, {
-  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-pwa7" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-compact8" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 app.get("/@gallery.js", (c) => c.body(galleryJs, 200, {
-  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-pwa7" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-compact8" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 
 // Dedicated PWA assets; official OpenList manifest and frontend are untouched.

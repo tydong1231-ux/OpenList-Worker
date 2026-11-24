@@ -249,11 +249,20 @@ export async function runGalleryCron(env:any,scheduledTime:number) {
   const result=await scanStep(g)
   if(result.worked)console.log("[GalleryCron] indexed page",{pages:result.pages,found:result.found||0,done:result.done})
 }
-async function serialize(c:any,g:GalleryCtx,items:IndexedMedia[]) {
+async function serialize(c:any,g:GalleryCtx,items:IndexedMedia[],epoch?:number) {
+  const visible=items.filter(f=>g.allowed(f.full_path))
+  const stills=visible.filter(f=>f.kind==="image"&&f.day!=="0000-00-00"&&liveStillStem(f.name)).map(f=>f.fid)
+  const live=new Set<string>()
+  if(typeof epoch==="number"&&stills.length){
+    // Outer lookup uses the scope/FID primary key; inner lookup is constrained
+    // to the partial video-name index. Never scan the full media table per tile.
+    const base="SELECT s.fid AS fid FROM "+I+" s WHERE s.scope=? AND s.epoch>=? AND s.fid IN ("+stills.map(()=>"?").join(",")+") AND (SELECT COUNT(*) FROM "+I+" AS v INDEXED BY private_gallery_live_mov WHERE v.scope=s.scope AND v.folder=s.folder AND v.kind='video' AND v.name COLLATE NOCASE=(CASE WHEN lower(s.name) LIKE '%.jpg' THEN substr(s.name,1,length(s.name)-4) ELSE substr(s.name,1,length(s.name)-5) END)||'.mov' AND v.day=s.day AND v.epoch>=? AND v.size>0 AND v.size<=104857600)=1"
+    try{for(const f of await rows(g.db,base,g.scope,epoch,...stills,epoch))live.add(f.fid)}catch{/* Optional badge must not block the album. */}
+  }
   const key=await deriveConfigEncryptionKey("private-gallery-v1:"+g.secret)
-  return Promise.all(items.filter(f=>g.allowed(f.full_path)).map(async f=>({
+  return Promise.all(visible.map(async f=>({
     id:f.fid, name:f.name, full_path:f.full_path, folder:f.folder, kind:f.kind, size:f.size,
-    day:f.day,date_source:f.date_source,tag:f.tag,is_dir:false,
+    day:f.day,date_source:f.date_source,tag:f.tag,is_dir:false,live:live.has(f.fid),
     thumb:f.thumb_enc?await decryptConfigValue(f.thumb_enc,key).then(safeThumb).catch(()=>""):"",
     sign:await signDownloadPath(c,f.full_path,900),
   })))
@@ -280,7 +289,7 @@ galleryMemoryRouter.get("/feed",async(c)=>{
     // file links are fetched lazily when the virtual memory folder is opened.
     const coverIds=groups.map(group=>group.items[0].fid)
     const covers=coverIds.length?await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND fid IN ("+coverIds.map(()=>"?").join(",")+")",g.scope,minEpoch,...coverIds):[]
-    const coverMap=new Map((await serialize(c,g,covers)).map(f=>[f.id,f]))
+    const coverMap=new Map((await serialize(c,g,covers,minEpoch)).map(f=>[f.id,f]))
     const cards=groups.map(group=>({id:group.id,title:group.title,subtitle:group.subtitle,count:group.items.length,ids:group.items.map(f=>f.fid),cover:coverMap.get(group.items[0].fid)||null}))
     return ok(c,{...publicState(s),total:months.reduce((n,m)=>n+Number(m.n||0),0),tagged:months.reduce((n,m)=>n+Number(m.tagged||0),0),months:months.map(m=>({month:m.month,kind:m.kind,count:Number(m.n)})),cards})
   }catch{return fail(c,"暂时无法读取相册索引，请稍后重试。",503)}
@@ -293,7 +302,7 @@ galleryMemoryRouter.post("/memory-items",async(c)=>{
     const ids=[...new Set<string>(body.ids)],s=await ensure(g)
     const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND fid IN ("+ids.map(()=>"?").join(",")+")",g.scope,visibleEpoch(s),...ids)
     const byId=new Map(items.map(f=>[f.fid,f]))
-    return ok(c,{items:await serialize(c,g,ids.map(id=>byId.get(id)).filter(Boolean))})
+    return ok(c,{items:await serialize(c,g,ids.map(id=>byId.get(id)).filter(Boolean),visibleEpoch(s))})
   }catch{return fail(c,"暂时无法读取回忆，请稍后重试。",503)}
 })
 // Resolve one potential companion only when a still image is opened.
@@ -305,7 +314,7 @@ galleryMemoryRouter.post("/live-pair",async(c)=>{
     const s=await ensure(g),epoch=visibleEpoch(s)
     const still=await first(g.db,"SELECT fid,folder,full_path,name,kind,day FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,epoch)
     if(!still||!g.allowed(still.full_path)||still.kind!=="image"||!liveStillStem(still.name))return ok(c,{item:null})
-    const candidates=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND folder=? AND kind='video' AND name COLLATE NOCASE=? AND epoch>=? LIMIT 3",g.scope,still.folder,liveStillStem(still.name)+".mov",epoch)
+    const candidates=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND folder=? AND kind='video' AND name COLLATE NOCASE=? AND epoch>=? AND day=? AND size>0 AND size<=104857600 LIMIT 3",g.scope,still.folder,liveStillStem(still.name)+".mov",epoch,still.day)
     const pair=chooseLivePair(still,candidates.filter(f=>g.allowed(f.full_path)))
     return ok(c,{item:pair?(await serialize(c,g,[pair]))[0]:null,match:pair?"same-name-and-day":null})
   }catch{return fail(c,"暂时无法检查实况照片。",503)}
@@ -339,6 +348,6 @@ galleryMemoryRouter.get("/timeline",async(c)=>{
     const plan=timelineQuery({sort:c.req.query("sort"),kind:c.req.query("kind"),month:c.req.query("month"),q:c.req.query("q"),key:c.req.query("key")||c.req.query("day"),fid:c.req.query("fid")})
     const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=?"+plan.where+" ORDER BY "+plan.order+" LIMIT "+(PAGE_SIZE+1),g.scope,visibleEpoch(s),...plan.args)
     const page=items.slice(0,PAGE_SIZE),last=page[page.length-1]
-    return ok(c,{items:await serialize(c,g,page),next:items.length>PAGE_SIZE&&last?{key:plan.key(last),fid:last.fid}:null,epoch:Number(s.epoch)})
+    return ok(c,{items:await serialize(c,g,page,visibleEpoch(s)),next:items.length>PAGE_SIZE&&last?{key:plan.key(last),fid:last.fid}:null,epoch:Number(s.epoch)})
   }catch{return fail(c,"暂时无法读取照片，请稍后重试。",503)}
 })

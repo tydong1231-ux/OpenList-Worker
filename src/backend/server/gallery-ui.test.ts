@@ -84,3 +84,16 @@ test("gallery install assets use dedicated same-origin manifest and network-only
  assert.match(galleryJs,/serviceWorker.register/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
+
+
+test("compact album keeps sync in menu, sticky filters, saved five-stage grid and live badges",()=>{
+ assert.match(galleryHtml,/id="menu".*id="albumMenuSync".*id="memorySync"/)
+ assert.doesNotMatch(galleryHtml,/<h2>回忆 <span>Memories/)
+ assert.match(galleryCss,/\.albumfilters\{position:sticky;top:var\(--gallery-top-height/)
+ assert.match(galleryJs,/store\("gallery-media-density",value\)/)
+ assert.match(galleryJs,/\[1,2,3,4,6\]/)
+ assert.match(galleryJs,/memoryPullDistance>=110/)
+ assert.match(galleryJs,/if\(f.live\)addLiveBadge/)
+ assert.doesNotMatch(galleryJs,/已加载 "\+memPageItems/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

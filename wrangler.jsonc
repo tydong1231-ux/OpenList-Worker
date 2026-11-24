@@ -24,8 +24,8 @@
   "keep_vars": true,
   // Free, reversible latency experiment for overseas D1 + Quark API.
   "placement": { "mode": "smart" },
-  // 09:00-00:59 CST: fast initial pass; normal scans only on :00/:30.
-  "triggers": { "crons": ["* 1-16 * * *"] },
+  // 09:00-00:59 CST: unfinished generations every 5 min; incremental on :00/:30.
+  "triggers": { "crons": ["*/5 1-16 * * *"] },
   "routes": [{ "pattern": "drive.botly.cc", "custom_domain": true }],
   "assets": {
     "directory": "./dist",

@@ -15,3 +15,15 @@ test("gallery client script parses and uses existing authenticated APIs", () => 
   assert.match(galleryJs, /media\.preload="metadata"/)
   assert.match(galleryCss, /prefers-reduced-motion/)
 })
+
+
+test("compact header has one shared toolbar and no duplicate hero", () => {
+  assert.match(galleryHtml, /id="compactBar"/)
+  assert.match(galleryHtml, /id="browseToolbar"/)
+  assert.equal((galleryHtml.match(/id="searchToggle"/g) || []).length, 1)
+  assert.doesNotMatch(galleryHtml, /YOUR COLLECTION/)
+  assert.match(galleryCss, /grid-template-areas:"back home crumbs toolbar actions"/)
+  assert.match(galleryCss, /grid-template-areas:"back home actions" "toolbar toolbar toolbar"/)
+  assert.match(galleryCss, /min-height:44px/)
+  assert.doesNotThrow(() => new Script(galleryJs))
+})

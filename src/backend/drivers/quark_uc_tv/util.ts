@@ -38,7 +38,7 @@ const CONFS: Record<"quark" | "uc", Conf> = {
     signKey: "kw2dvtd7p4t3pjl2d9ed9yc8yej8kw2d",
     appVer: "1.8.2.2",
     channel: "GENERAL",
-    codeApi: "http://api.extscreen.com/quarkdrive",
+    codeApi: "https://api.extscreen.com/quarkdrive",
   },
   uc: {
     api: "https://open-api-drive.uc.cn",
@@ -46,7 +46,7 @@ const CONFS: Record<"quark" | "uc", Conf> = {
     signKey: "l3srvtd7p42l0d0x1u8d7yc8ye9kki4d",
     appVer: "1.7.2.2",
     channel: "UCTVOFFICIALWEB",
-    codeApi: "http://api.extscreen.com/ucdrive",
+    codeApi: "https://api.extscreen.com/ucdrive",
   },
 }
 
@@ -68,7 +68,7 @@ export class ClientQuarkUcTv {
     this.conf =
       (variantKey === "uc" || variantKey === "quark" ? CONFS[variantKey] : null) ||
       CONFS.quark
-    this.deviceId = addition.device_id || md5(String(Date.now()))
+    this.deviceId = addition.device_id || crypto.randomUUID().replace(/-/g, "")
     this.addition.device_id = this.deviceId
   }
 
@@ -115,6 +115,7 @@ export class ClientQuarkUcTv {
     method: string,
     extraQuery: Record<string, string> = {},
     retried = false,
+    allowRefresh = true,
   ): Promise<T> {
     const { tm, token, reqId } = await this.generateSign(method, pathname)
     const qs = new URLSearchParams({
@@ -125,6 +126,8 @@ export class ClientQuarkUcTv {
     })
     const resp = await fetch(`${this.conf.api}${pathname}?${qs.toString()}`, {
       method,
+      redirect: "error",
+      signal: AbortSignal.timeout(12000),
       headers: {
         Accept: "application/json, text/plain, */*",
         "User-Agent": UA,
@@ -136,22 +139,49 @@ export class ClientQuarkUcTv {
     const data: QuarkTvCommonResp = await resp
       .json()
       .catch(() => ({ status: -1, errno: -1 }) as any)
-    const errInfo = (data.error_info || "").toLowerCase()
+    const errInfo = String(data.error_info || "").toLowerCase()
     const tokenInvalid =
       (data.status === -1 && (data.errno === 10001 || data.errno === 11001)) ||
       errInfo.includes("access token") ||
       errInfo.includes("access_token") ||
       errInfo.includes("token无效") ||
       errInfo.includes("token 无效")
-    if (tokenInvalid) {
+    if (tokenInvalid && allowRefresh) {
       if (retried) throw new Error("[QuarkTV] Authorization expired; please re-authorize the Quark TV mount.")
       await this.refreshToken()
       return this.request<T>(pathname, method, extraQuery, true)
     }
-    if (data.status >= 400 || data.errno !== 0) {
-      throw new Error(`[QuarkTV] ${data.error_info || `errno ${data.errno}`}`)
+    if (!resp.ok || data.status >= 400 || (data.errno !== undefined && data.errno !== 0)) {
+      throw new Error(`[QuarkTV] upstream request failed (HTTP ${resp.status}, errno ${Number(data.errno) || 0})`)
     }
     return data as T
+  }
+
+  // Port of OpenList Go quark_uc_tv/getLoginCode and getCode.
+  // QR login must not try refreshing an empty access token.
+  async startLogin(): Promise<{ qrData: string; queryToken: string; deviceId: string }> {
+    const r = await this.request<any>("/oauth/authorize", "GET", {
+      auth_type: "code", client_id: this.conf.clientID, scope: "netdisk",
+      qrcode: "1", qr_width: "460", qr_height: "460",
+    }, false, false)
+    if (typeof r.qr_data !== "string" || !r.qr_data || typeof r.query_token !== "string" || !r.query_token) {
+      throw new Error("[QuarkTV] Authorization response did not contain a QR code.")
+    }
+    return { qrData: r.qr_data, queryToken: r.query_token, deviceId: this.deviceId }
+  }
+
+  async completeLogin(queryToken: string): Promise<void> {
+    const r = await this.request<any>("/oauth/code", "GET", {
+      client_id: this.conf.clientID, scope: "netdisk", query_token: queryToken,
+    }, false, false)
+    if (typeof r.code !== "string" || !r.code) {
+      throw new Error("[QuarkTV] Scan and confirm before retrying.")
+    }
+    await this.exchangeToken({ code: r.code })
+  }
+
+  async verifyLogin(): Promise<void> {
+    await this.request("/user", "GET", { method: "user_info" })
   }
 
   private async refreshToken(): Promise<void> {
@@ -162,30 +192,31 @@ export class ClientQuarkUcTv {
   }
 
   private async doRefreshToken(): Promise<void> {
-    const pathname = "/token"
-    const { reqId } = await this.generateSign("POST", pathname)
-    const body: Record<string, string> = {
-      req_id: reqId,
-      ...this.deviceQuery(),
+    if (!this.addition.refresh_token) throw new Error("[QuarkTV] Missing refresh token.")
+    await this.exchangeToken({ refresh_token: this.addition.refresh_token })
+  }
+
+  private async exchangeToken(credential: { code: string } | { refresh_token: string }): Promise<void> {
+    const { reqId } = await this.generateSign("POST", "/token")
+    let resp: Response
+    try {
+      // No plaintext fallback for authorization credentials.
+      resp = await fetch(`${this.conf.codeApi}/token`, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(12000),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ req_id: reqId, ...this.deviceQuery(), ...credential }),
+      })
+    } catch {
+      throw new Error("[QuarkTV] Secure token exchange endpoint unavailable; please retry.")
     }
-    if (this.accessToken) {
-      body.refresh_token = this.addition.refresh_token
-    } else {
-      body.refresh_token = this.addition.refresh_token
-    }
-    const resp = await fetch(`${this.conf.codeApi}${pathname}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
     const data: any = await resp.json().catch(() => ({}))
-    if (data?.code !== 200)
-      throw new Error("[QuarkTV] Token refresh failed; if authorization has expired, please re-authorize the Quark TV mount.")
+    if (!resp.ok || data?.code !== 200)
+      throw new Error("[QuarkTV] Token exchange failed; scan again if authorization expired.")
     const d = data.data || {}
-    if (!d.access_token) throw new Error("[QuarkTV] Token refresh returned no access token; please re-authorize.")
+    if (!d.access_token || (!d.refresh_token && !this.addition.refresh_token)) {
+      throw new Error("[QuarkTV] Token exchange returned incomplete credentials.")
+    }
     const next = { access_token: String(d.access_token), refresh_token: String(d.refresh_token || this.addition.refresh_token), device_id: this.deviceId }
-    // Retain rotated values in this client even if persistence fails, but fail
-    // the request rather than silently serving data with unsaved credentials.
     Object.assign(this.addition, next)
     if (this.onTokenUpdate) await this.onTokenUpdate(next)
     this.accessToken = next.access_token
@@ -220,8 +251,8 @@ export class ClientQuarkUcTv {
     return all
   }
 
-  async getDownloadUrl(fid: string): Promise<string> {
-    if (this.addition.link_method === "streaming") {
+  async getDownloadUrl(fid: string, isVideo = false): Promise<string> {
+    if (this.addition.link_method === "streaming" && isVideo) {
       const resp = await this.request<QuarkTvCommonResp>("/file", "GET", {
         method: "streaming",
         group_by: "source",

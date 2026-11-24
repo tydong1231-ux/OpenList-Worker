@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { quarkTvSetupRouter } from "./quark-tv-setup"
 import {
   getDb,
   saveDb,
@@ -33,6 +34,9 @@ adminRouter.use("*", async (c, next) => {
   }
   await next()
 })
+
+// QR APIs inherit the existing admin-only middleware.
+adminRouter.route("/quark-tv", quarkTvSetupRouter)
 
 // 生成密码学安全的随机 token（替代 Math.random）
 function generateSecureToken(length = 32): string {

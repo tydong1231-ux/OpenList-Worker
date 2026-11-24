@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { quarkTvSetupPage, quarkTvSetupScript } from "./server/quark-tv-setup-page"
 import { setupRouter } from "./server/router"
 import { rawRouter } from "./server/raw"
 import {
@@ -167,6 +168,20 @@ for (const path of KV_PROXY_PATHS) {
 const api = new Hono()
 setupRouter(api)
 app.route("/api", api)
+
+// Same-origin QR setup helper, separate from the official SPA.
+app.get("/@quark-tv", (c) => {
+  c.header("Cache-Control", "no-store")
+  c.header("Referrer-Policy", "no-referrer")
+  c.header("X-Frame-Options", "DENY")
+  c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+  return c.html(quarkTvSetupPage)
+})
+app.get("/@quark-tv.js", (c) => {
+  c.header("Cache-Control", "no-store")
+  c.header("X-Content-Type-Options", "nosniff")
+  return c.body(quarkTvSetupScript, 200, { "Content-Type": "application/javascript; charset=utf-8" })
+})
 
 // Mount specific short paths at root for better compatibility
 app.route("/d", rawRouter)

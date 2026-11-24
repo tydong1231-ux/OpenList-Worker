@@ -13,7 +13,8 @@ import {
 } from "../internal/op/storage"
 import { resolveShare } from "../internal/op/share"
 import { resolvePath } from "../internal/model/db"
-import { getUserFromContext } from "./middlewares"
+import { getUserFromContext, getJwtSecret } from "./middlewares"
+import { galleryHintKey, signGalleryHint } from "../pkg/gallery-hint"
 import {
   can,
   canCopy,
@@ -304,6 +305,7 @@ fsRouter.post("/dirs", async (c) => {
 })
 
 fsRouter.post("/list", async (c) => {
+  const requestStarted = Date.now()
   const body = await c.req.json().catch(() => ({}))
   const user = await getUserFromContext(c)
   const isShare = (body.path || "/").startsWith("/@s")
@@ -312,6 +314,11 @@ fsRouter.post("/list", async (c) => {
   }
   const requestContext = getStorageRequestContext(c)
   const reqPath = getActualPath(user, body.path || "/")
+  // Only authenticated administrators receive short-lived directory locators. Ordinary ACLs below still apply.
+  const gallery = body.gallery === true && isAdmin(user) && user?.id != null && !isShare && requestContext
+    ? { key: await galleryHintKey(await getJwtSecret(c)), owner: String(user.id), hint: typeof body.gallery_hint === "string" ? body.gallery_hint : undefined, refresh: body.refresh === true, usedHint: false }
+    : undefined
+  if (gallery && requestContext) (requestContext as import("../internal/op/storage").StorageRequestContext).gallery = gallery
   const page = parseInt(body.page, 10) || 1
   const perPage = parseInt(body.per_page, 10) || 0
 
@@ -445,10 +452,12 @@ fsRouter.post("/list", async (c) => {
       )
     }
 
+    const listStarted = Date.now()
     const { content, provider, storage } = await listItems(
       reqPath,
       requestContext,
     )
+    const listMs = Date.now() - listStarted
     // write：用户写权限 + meta.write_users 白名单（对齐 Go common.CanWrite）
     const writable = canWrite(user) && canWriteMeta(user, meta, reqPath)
     const writeContentBypass = canWriteContentBypassUserPerms(meta, reqPath)
@@ -489,6 +498,7 @@ fsRouter.post("/list", async (c) => {
             type: item.type ?? 0,
             hashinfo: hashInfoStr,
             hash_info: hashInfo,
+            ...(gallery && storage && item.is_dir && item.quark_tv_dir_id ? { gallery_hint: await signGalleryHint(gallery.key, storage, fullPath, gallery.owner, item.quark_tv_dir_id) } : {}),
           }
         }),
     )
@@ -562,6 +572,7 @@ fsRouter.post("/list", async (c) => {
     })()
 
     const { content: pagedContent, total } = paginateStorageItems(normalized)
+    if (body.gallery === true) c.header("Cache-Control", "no-store, private")
     // cache_expiration 保留字段以兼容 Go 客户端：持久缓存已移除，列表始终实时，
     // 因此固定返回 0（Go 语义即「不缓存」）。
     return c.json({
@@ -578,6 +589,7 @@ fsRouter.post("/list", async (c) => {
         direct_upload_tools: directUploadTools,
         page_size: effectivePerPage > 0 ? effectivePerPage : undefined,
         cache_expiration: 0,
+        ...(body.gallery === true ? { gallery_timing: { server_ms: Date.now() - requestStarted, list_ms: listMs, hint_used: !!gallery?.usedHint, colo: String((c.req.raw as any).cf?.colo || "") } } : {}),
       },
     })
   } catch (err: any) {

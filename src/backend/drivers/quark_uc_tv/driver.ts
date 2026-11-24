@@ -11,7 +11,7 @@ const DEFAULT_ROOT = "0"
 /** 只读驱动：仅 list + get（下载） */
 export class DriverQuarkUcTv implements StorageDriver {
   private client: ClientQuarkUcTv
-  private pathCache = new Map<string, string>()
+  private pathCache = new Map<string, { fid: string; until: number }>()
 
   constructor(
     addition: DriverQuarkUcTvAddition,
@@ -36,14 +36,28 @@ export class DriverQuarkUcTv implements StorageDriver {
       sign: "",
       type: calcFileType(f.filename, isDir),
       thumb: f.thumbnail_url || "",
+      ...(isDir ? { quark_tv_dir_id: f.fid } : {}),
       raw_url: "",
     }
   }
 
   async list(_virtualPath: string, physicalPath: string): Promise<FileItem[]> {
     const fid = await this.resolveDirId(physicalPath)
+    return this.listByDirectoryId(physicalPath, fid)
+  }
+
+  /** Called only with a server-verified, mount-scoped directory locator. */
+  async listByDirectoryId(physicalPath: string, fid: string): Promise<FileItem[]> {
     const files = await this.client.getFiles(fid)
+    const clean = this.cleanPath(physicalPath)
+    this.rememberPath(clean, fid)
+    for (const f of files) if (f.isdir === 1 && f.fid && f.filename) this.rememberPath(clean ? clean + "/" + f.filename : f.filename, f.fid)
     return files.map((f) => this.fileToItem(f))
+  }
+
+  async listFresh(virtualPath: string, physicalPath: string): Promise<FileItem[]> {
+    this.pathCache.clear()
+    return this.list(virtualPath, physicalPath)
   }
 
   async get(_virtualPath: string, physicalPath: string): Promise<FileItem> {
@@ -116,20 +130,44 @@ export class DriverQuarkUcTv implements StorageDriver {
     throw new Error("[QuarkTV] read-only storage")
   }
 
-  private async resolveDirId(physicalPath: string): Promise<string> {
-    const clean = physicalPath.split("/").filter(Boolean).join("/")
-    if (!clean) return DEFAULT_ROOT
-    if (this.pathCache.has(clean)) return this.pathCache.get(clean)!
+  private cleanPath(path: string): string {
+    return path.split("/").filter(Boolean).join("/")
+  }
 
+  private cachedPath(path: string): string | undefined {
+    const entry = this.pathCache.get(path)
+    if (!entry) return undefined
+    if (entry.until <= Date.now()) { this.pathCache.delete(path); return undefined }
+    return entry.fid
+  }
+
+  private rememberPath(path: string, fid: string) {
+    if (!path || !fid) return
+    this.pathCache.delete(path)
+    this.pathCache.set(path, { fid, until: Date.now() + 60000 })
+    while (this.pathCache.size > 4096) this.pathCache.delete(this.pathCache.keys().next().value!)
+  }
+
+  private async resolveDirId(physicalPath: string): Promise<string> {
+    const clean = this.cleanPath(physicalPath)
+    if (!clean) return DEFAULT_ROOT
+    const hit = this.cachedPath(clean)
+    if (hit) return hit
     const parts = clean.split("/")
     let currentId = DEFAULT_ROOT
-    for (let i = 0; i < parts.length; i++) {
+    // Reuse the longest known ancestor instead of always walking from the root.
+    let start = 0
+    for (let i = parts.length - 1; i > 0; i--) {
+      const prefix = this.cachedPath(parts.slice(0, i).join("/"))
+      if (prefix) { currentId = prefix; start = i; break }
+    }
+    for (let i = start; i < parts.length; i++) {
       const files = await this.client.getFiles(currentId)
+      const prefix = parts.slice(0, i).join("/")
+      for (const f of files) if (f.isdir === 1 && f.fid && f.filename) this.rememberPath(prefix ? prefix + "/" + f.filename : f.filename, f.fid)
       const target = files.find((f) => f.isdir === 1 && f.filename === parts[i])
-      if (!target) throw new Error(`[QuarkTV] Directory '${parts[i]}' not found`)
+      if (!target) throw new Error("[QuarkTV] Directory not found")
       currentId = target.fid
-      const subPath = "/" + parts.slice(0, i + 1).join("/")
-      this.pathCache.set(subPath, currentId)
     }
     return currentId
   }

@@ -1,6 +1,7 @@
 import { resolvePath, getDb, getSettings, saveDb } from "../model/db"
 import { isSafeUrl } from "../../pkg/http"
 import { encodeDownloadPath } from "../../pkg/path"
+import { verifyGalleryHint } from "../../pkg/gallery-hint"
 import { canUseProxyEndpoint, normalizeExtList } from "../driver/proxy"
 import { FileItem, StorageDriver, calcFileType } from "../driver/base"
 import { Onedrive } from "../../drivers/onedrive/driver"
@@ -143,6 +144,7 @@ function setDriverCache(key: string, driver: StorageDriver): void {
 export interface StorageRequestContext {
   waitUntil?: (promise: Promise<unknown>) => void
   env?: any // ESA/Cloudflare env，用于请求级缓存复用
+  gallery?: { key: CryptoKey; owner: string; hint?: string; refresh: boolean; usedHint: boolean }
 }
 
 export interface GetDriverOptions {
@@ -1497,7 +1499,15 @@ async function listItemsResolved(
       const driver = await getDriver(driverName, resolved.storage)
       // Get raw items from driver
       try {
-        items = await driver.list(virtualPath, resolved.physical!)
+        const gallery = requestContext?.gallery
+        if (gallery && driver instanceof DriverQuarkUcTv) {
+          const fid = !gallery.refresh ? await verifyGalleryHint(gallery.key, resolved.storage, resolved.cleanPath, gallery.owner, gallery.hint) : undefined
+          if (fid) {
+            gallery.usedHint = true
+            items = await driver.listByDirectoryId(resolved.physical!, fid)
+          } else if (gallery.refresh) items = await driver.listFresh(virtualPath, resolved.physical!)
+          else items = await driver.list(virtualPath, resolved.physical!)
+        } else items = await driver.list(virtualPath, resolved.physical!)
       } finally {
         await flushPendingDriverState(
           driverName,

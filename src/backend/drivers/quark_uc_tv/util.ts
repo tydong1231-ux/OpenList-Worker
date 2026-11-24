@@ -55,9 +55,14 @@ export class ClientQuarkUcTv {
   private addition: DriverQuarkUcTvAddition
   private accessToken = ""
   private deviceId: string
+  private refreshInFlight?: Promise<void>
 
-  constructor(addition: DriverQuarkUcTvAddition) {
+  constructor(
+    addition: DriverQuarkUcTvAddition,
+    private readonly onTokenUpdate?: (state: Pick<DriverQuarkUcTvAddition, "refresh_token" | "access_token" | "device_id">) => Promise<void>,
+  ) {
     this.addition = addition
+    this.accessToken = addition.access_token || ""
     // UI 下拉传入的是 "Quark"/"UC"（首字母大写），协议端固定小写键
     const variantKey = (addition.variant || "quark").toLowerCase()
     this.conf =
@@ -71,7 +76,10 @@ export class ClientQuarkUcTv {
     if (!this.addition.refresh_token) {
       throw new Error("[QuarkTV] refresh_token is required")
     }
-    await this.refreshToken()
+    // Reuse the persisted access token across isolate restarts. Refresh only
+    // when necessary, and save rotated credentials before using them.
+    if (!this.accessToken) await this.refreshToken()
+    else if (this.onTokenUpdate) await this.onTokenUpdate({ refresh_token: this.addition.refresh_token, access_token: this.accessToken, device_id: this.deviceId })
   }
 
   private async generateSign(
@@ -106,6 +114,7 @@ export class ClientQuarkUcTv {
     pathname: string,
     method: string,
     extraQuery: Record<string, string> = {},
+    retried = false,
   ): Promise<T> {
     const { tm, token, reqId } = await this.generateSign(method, pathname)
     const qs = new URLSearchParams({
@@ -135,8 +144,9 @@ export class ClientQuarkUcTv {
       errInfo.includes("token无效") ||
       errInfo.includes("token 无效")
     if (tokenInvalid) {
+      if (retried) throw new Error("[QuarkTV] Authorization expired; please re-authorize the Quark TV mount.")
       await this.refreshToken()
-      return this.request<T>(pathname, method, extraQuery)
+      return this.request<T>(pathname, method, extraQuery, true)
     }
     if (data.status >= 400 || data.errno !== 0) {
       throw new Error(`[QuarkTV] ${data.error_info || `errno ${data.errno}`}`)
@@ -145,6 +155,13 @@ export class ClientQuarkUcTv {
   }
 
   private async refreshToken(): Promise<void> {
+    if (this.refreshInFlight) return this.refreshInFlight
+    const pending = this.doRefreshToken()
+    this.refreshInFlight = pending
+    try { await pending } finally { if (this.refreshInFlight === pending) this.refreshInFlight = undefined }
+  }
+
+  private async doRefreshToken(): Promise<void> {
     const pathname = "/token"
     const { reqId } = await this.generateSign("POST", pathname)
     const body: Record<string, string> = {
@@ -163,11 +180,15 @@ export class ClientQuarkUcTv {
     })
     const data: any = await resp.json().catch(() => ({}))
     if (data?.code !== 200)
-      throw new Error(`[QuarkTV] ${data?.message || "token refresh failed"}`)
+      throw new Error("[QuarkTV] Token refresh failed; if authorization has expired, please re-authorize the Quark TV mount.")
     const d = data.data || {}
-    if (!d.access_token) throw new Error("[QuarkTV] refresh token empty")
-    this.accessToken = d.access_token
-    if (d.refresh_token) this.addition.refresh_token = d.refresh_token
+    if (!d.access_token) throw new Error("[QuarkTV] Token refresh returned no access token; please re-authorize.")
+    const next = { access_token: String(d.access_token), refresh_token: String(d.refresh_token || this.addition.refresh_token), device_id: this.deviceId }
+    // Retain rotated values in this client even if persistence fails, but fail
+    // the request rather than silently serving data with unsaved credentials.
+    Object.assign(this.addition, next)
+    if (this.onTokenUpdate) await this.onTokenUpdate(next)
+    this.accessToken = next.access_token
   }
 
   async getFiles(parentFid: string): Promise<QuarkTvFile[]> {
@@ -190,9 +211,10 @@ export class ClientQuarkUcTv {
         page_index: String(pageIndex),
       })
       const data = resp.data as QuarkTvFilesData | undefined
-      if (data?.files) all.push(...data.files)
-      const total = data?.total_count || 0
-      if (pageIndex * pageSize >= total) break
+      const files = data?.files || []
+      all.push(...files)
+      const total = data?.total_count
+      if (!files.length || (typeof total === "number" && all.length >= total) || (typeof total !== "number" && files.length < pageSize)) break
       pageIndex++
     }
     return all

@@ -167,6 +167,29 @@ export async function getOrCreateDriver(
   }
 }
 
+// Persist driver rotations, respecting the admin update path's deferred save.
+// Never overwrite a newly edited authorization with an older driver instance.
+async function persistQuarkState(storageConfig: any, state: Record<string, any>): Promise<void> {
+  const next = JSON.stringify({ ...parseAddition(storageConfig), ...state })
+  if (deferredTokenPersistence.has(storageConfig)) {
+    storageConfig.addition = next
+    return
+  }
+  const db = await getDb()
+  const st = (db.storages || []).find((s: any) => s.id === storageConfig.id)
+  if (!st || st.modified !== storageConfig.modified) {
+    throw new Error("[Quark] Storage configuration changed; reload and retry.")
+  }
+  const old = parseAddition(st)
+  if (Object.entries(state).every(([k, v]) => old[k] === v)) {
+    storageConfig.addition = JSON.stringify(old)
+    return
+  }
+  st.addition = JSON.stringify({ ...old, ...state })
+  if (!(await saveDb(db))) throw new Error("[Quark] Failed to persist authorization; retry before continuing.")
+  storageConfig.addition = st.addition
+}
+
 function parseAddition(storageConfig?: any): any {
   const additionStr = storageConfig?.addition
   if (!additionStr) return {}
@@ -284,7 +307,7 @@ async function createDriver(
     normDriver === "uc" ||
     normDriver === "quarkcookie"
   ) {
-    driver = new QuarkDriver(parseAddition(storageConfig))
+    driver = new QuarkDriver(parseAddition(storageConfig), (cookie) => persistQuarkState(storageConfig, { cookie }))
     await driver.init?.()
   // 注意：115 / 115Open 统一走 Pan115Driver（115open 目录）。
   // 旧 drivers/115（Client115）端点写成 /open + /open/ufile/files → /open/open/ufile/files，
@@ -375,7 +398,7 @@ async function createDriver(
     normDriver === "quark_open" ||
     normDriver === "quarkoa"
   ) {
-    driver = new DriverQuarkOpen(parseAddition(storageConfig))
+    driver = new DriverQuarkOpen(parseAddition(storageConfig), (state) => persistQuarkState(storageConfig, state))
     await driver.init?.()
   } else if (
     normDriver === "quarktv" ||
@@ -383,7 +406,7 @@ async function createDriver(
     normDriver === "uctv" ||
     normDriver === "quark_uc_tv"
   ) {
-    driver = new DriverQuarkUcTv(parseAddition(storageConfig))
+    driver = new DriverQuarkUcTv(parseAddition(storageConfig), (state) => persistQuarkState(storageConfig, state))
     await driver.init?.()
   } else if (
     normDriver === "123open" ||

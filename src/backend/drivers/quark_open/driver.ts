@@ -12,8 +12,11 @@ export class DriverQuarkOpen implements StorageDriver {
   private client: ClientQuarkOpen
   private pathCache = new Map<string, string>()
 
-  constructor(addition: DriverQuarkOpenAddition) {
-    this.client = new ClientQuarkOpen(addition)
+  constructor(
+    addition: DriverQuarkOpenAddition,
+    onTokenUpdate?: ConstructorParameters<typeof ClientQuarkOpen>[1],
+  ) {
+    this.client = new ClientQuarkOpen(addition, onTokenUpdate)
   }
 
   async init(): Promise<void> {

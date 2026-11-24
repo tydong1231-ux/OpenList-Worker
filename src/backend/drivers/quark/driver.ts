@@ -28,8 +28,8 @@ export class QuarkDriver implements StorageDriver {
   private client: QuarkClient
   private pathFileIdCache = new Map<string, string>()
 
-  constructor(addition: QuarkAddition) {
-    this.client = new QuarkClient(addition)
+  constructor(addition: QuarkAddition, onCookieUpdate?: ConstructorParameters<typeof QuarkClient>[1]) {
+    this.client = new QuarkClient(addition, onCookieUpdate)
   }
 
   async init(): Promise<void> {

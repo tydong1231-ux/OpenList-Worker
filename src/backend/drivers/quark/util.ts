@@ -78,11 +78,11 @@ export class QuarkClient {
   private cookie: string
 
   // Persisted-cookie callback (optional, used to save updated cookies)
-  private onCookieUpdate?: (newCookie: string) => void
+  private onCookieUpdate?: (newCookie: string) => void | Promise<void>
 
   constructor(
     addition: QuarkAddition,
-    onCookieUpdate?: (newCookie: string) => void,
+    onCookieUpdate?: (newCookie: string) => void | Promise<void>,
   ) {
     this.addition = addition
     this.conf = getConf(addition.variant || "Quark")
@@ -148,14 +148,14 @@ export class QuarkClient {
       const puus = extractCookieFromSetCookie(setCookieHeader, "__puus")
       if (puus) {
         this.cookie = setCookieValue(this.cookie, "__puus", puus)
-        this.onCookieUpdate?.(this.cookie)
+        await this.onCookieUpdate?.(this.cookie)
       }
       // Quark transcoding also refreshes __pus
       if (this.addition.variant === "Quark") {
         const pus = extractCookieFromSetCookie(setCookieHeader, "__pus")
         if (pus) {
           this.cookie = setCookieValue(this.cookie, "__pus", pus)
-          this.onCookieUpdate?.(this.cookie)
+          await this.onCookieUpdate?.(this.cookie)
         }
       }
     }

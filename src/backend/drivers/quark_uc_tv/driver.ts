@@ -13,8 +13,11 @@ export class DriverQuarkUcTv implements StorageDriver {
   private client: ClientQuarkUcTv
   private pathCache = new Map<string, string>()
 
-  constructor(addition: DriverQuarkUcTvAddition) {
-    this.client = new ClientQuarkUcTv(addition)
+  constructor(
+    addition: DriverQuarkUcTvAddition,
+    onTokenUpdate?: ConstructorParameters<typeof ClientQuarkUcTv>[1],
+  ) {
+    this.client = new ClientQuarkUcTv(addition, onTokenUpdate)
   }
 
   async init(): Promise<void> {

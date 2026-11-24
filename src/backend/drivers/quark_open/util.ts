@@ -29,7 +29,10 @@ export class ClientQuarkOpen {
   private appId: string
   private signKey: string
 
-  constructor(addition: DriverQuarkOpenAddition) {
+  constructor(
+    addition: DriverQuarkOpenAddition,
+    private readonly onTokenUpdate?: (state: Partial<DriverQuarkOpenAddition>) => Promise<void>,
+  ) {
     this.addition = addition
     this.accessToken = addition.access_token || ""
     this.refreshToken = addition.refresh_token || ""
@@ -181,6 +184,9 @@ export class ClientQuarkOpen {
     if (data.sign_key) this.signKey = data.sign_key
     this.addition.refresh_token = data.refresh_token
     this.addition.access_token = data.access_token
+    if (data.app_id) this.addition.app_id = data.app_id
+    if (data.sign_key) this.addition.sign_key = data.sign_key
+    if (this.onTokenUpdate) await this.onTokenUpdate({ access_token: this.accessToken, refresh_token: this.refreshToken, app_id: this.appId, sign_key: this.signKey })
   }
 
   async getFiles(parentFid: string): Promise<QuarkFile[]> {

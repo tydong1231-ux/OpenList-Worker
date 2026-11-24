@@ -3,6 +3,7 @@
 
 export interface DriverQuarkUcTvAddition {
   refresh_token: string
+  access_token?: string
   device_id?: string
   order_by?: string // "file_name" | "updated_at"
   order_direction?: string // "asc" | "desc"

@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { galleryHtml, galleryCss, galleryJs } from "./server/gallery-ui"
 import { quarkTvSetupPage, quarkTvSetupScript } from "./server/quark-tv-setup-page"
 import { setupRouter } from "./server/router"
 import { rawRouter } from "./server/raw"
@@ -168,6 +169,25 @@ for (const path of KV_PROXY_PATHS) {
 const api = new Hono()
 setupRouter(api)
 app.route("/api", api)
+
+// The private gallery replaces only the root and its dedicated alias.
+ // Original storage paths, admin, login, share and API routes remain intact.
+const serveGallery = (c: any) => {
+  c.header("Cache-Control", "no-store, private")
+  c.header("Referrer-Policy", "no-referrer")
+  c.header("X-Frame-Options", "DENY")
+  c.header("X-Content-Type-Options", "nosniff")
+  c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+  return c.html(galleryHtml)
+}
+app.get("/", serveGallery)
+app.get("/@gallery", serveGallery)
+app.get("/@gallery.css", (c) => c.body(galleryCss, 200, {
+  "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff",
+}))
+app.get("/@gallery.js", (c) => c.body(galleryJs, 200, {
+  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff",
+}))
 
 // Same-origin QR setup helper, separate from the official SPA.
 app.get("/@quark-tv", (c) => {

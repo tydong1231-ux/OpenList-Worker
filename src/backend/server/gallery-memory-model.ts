@@ -61,7 +61,7 @@ export function stableHash(s: string) {
   return h >>> 0
 }
 export interface IndexedMedia {
-  fid: string; full_path: string; folder: string; name: string; kind: string; day: string; date_source: string; size: number; tag: string; thumb_enc: string; shuffle: number
+  fid: string; full_path: string; folder: string; name: string; kind: string; day: string; date_source: string; size: number; tag: string; thumb_enc: string; shuffle: number; duration_seconds?: number
 }
 export interface MemoryGroup { id: string; title: string; subtitle: string; items: IndexedMedia[] }
 const distinct = (rows: IndexedMedia[]) => [...new Map(rows.map(x=>[x.fid,x])).values()]
@@ -104,4 +104,18 @@ export function chooseLivePair(still: Pick<IndexedMedia,"name"|"folder"|"day"|"k
   if(still.kind!=="image"||!stem||!still.day||still.day==="0000-00-00")return undefined
   const matches=candidates.filter(v=>v.kind==="video"&&v.folder===still.folder&&v.day===still.day&&v.name.toLowerCase()===(stem+".mov").toLowerCase()&&Number(v.size)>0&&Number(v.size)<=100*1024*1024)
   return matches.length===1?matches[0]:undefined
+}
+
+
+// TV listings may omit duration, or supply ambiguous units. Never guess a
+// numeric duration's unit. Opened videos can supply their real browser duration.
+export function mediaDurationSeconds(f:any):number {
+  const valid=(v:unknown,scale=1)=>{const n=(typeof v==="number"||(typeof v==="string"&&/^\d+(\.\d+)?$/.test(v)))?Number(v)/scale:0;return Number.isFinite(n)&&n>0&&n<=864000?Math.round(n*1000)/1000:0}
+  for(const o of [f,f?.video_info,f?.media_info,f?.metadata]){
+    if(!o||typeof o!=="object")continue
+    for(const v of [o.duration_seconds,o.duration_sec,o.duration_s,o.video_duration_seconds]){const n=valid(v);if(n)return n}
+    for(const v of [o.duration_ms,o.duration_milliseconds,o.video_duration_ms]){const n=valid(v,1000);if(n)return n}
+    if(typeof o.duration==="string"&&/^\d{1,3}:\d{2}(:\d{2})?$/.test(o.duration)){const p=o.duration.split(":").map(Number);if(p.slice(1).every((v:number)=>v<60)){const n=valid(p.reduce((a:number,b:number)=>a*60+b,0));if(n)return n}}
+  }
+  return 0
 }

@@ -97,3 +97,15 @@ test("compact album keeps sync in menu, sticky filters, saved five-stage grid an
  assert.doesNotMatch(galleryJs,/已加载 "\+memPageItems/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
+
+
+test("album chrome docks filters and media preview uses progressive direct links",()=>{
+ assert.match(galleryHtml,/id="albumDock"/)
+ assert.doesNotMatch(galleryHtml,/<h2>照片与视频<\/h2>/)
+ assert.match(galleryJs,/function setAlbumDock/)
+ assert.match(galleryCss,/backdrop-filter:saturate\(165%\) blur\(16px\)/)
+ assert.match(galleryJs,/\/admin\/gallery-memory\/media-link/)
+ assert.match(galleryJs,/media\.onloadedmetadata/)
+ assert.match(galleryJs,/function formatDuration/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

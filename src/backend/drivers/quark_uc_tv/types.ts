@@ -24,6 +24,8 @@ export interface QuarkTvFile {
   thumbnail_url?: string
   created_at?: number
   updated_at?: number
+  duration_seconds?: number
+  duration_ms?: number
 }
 
 export interface QuarkTvCommonResp {

@@ -6,7 +6,8 @@ import { getDisableIndex } from "../internal/driver/storageopts"
 import { getUserFromContext, getJwtSecret } from "./middlewares"
 import { deriveConfigEncryptionKey, encryptConfigValue, decryptConfigValue, sha256 } from "../pkg/crypto"
 import { signDownloadPath } from "../pkg/sign"
-import { GALLERY_ROOT, safeName, safeFid, mediaKind, mediaDate, mediaTags, safeThumb, stableHash, buildMemoryGroups, liveStillStem, chooseLivePair, type IndexedMedia } from "./gallery-memory-model"
+import { assertSafeUrl, getTrustedHosts } from "../pkg/http"
+import { GALLERY_ROOT, safeName, safeFid, mediaKind, mediaDate, mediaTags, safeThumb, stableHash, buildMemoryGroups, liveStillStem, chooseLivePair, mediaDurationSeconds, type IndexedMedia } from "./gallery-memory-model"
 
 export const galleryMemoryRouter = new Hono()
 // Only one Quark page per step. No timers/cron or image/video downloads on the server.
@@ -19,7 +20,7 @@ const schema = [
   "CREATE TABLE IF NOT EXISTS "+S+" (scope TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 1, pages INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, day TEXT NOT NULL DEFAULT '', day_pages INTEGER NOT NULL DEFAULT 0, lease TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', completed_at INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0)",
   "CREATE TABLE IF NOT EXISTS "+Q+" (scope TEXT NOT NULL, epoch INTEGER NOT NULL, fid TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL, page INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, next_check INTEGER NOT NULL DEFAULT 0, recent_page INTEGER NOT NULL DEFAULT 0, checked_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope,epoch,fid))",
   "CREATE INDEX IF NOT EXISTS private_gallery_queue_next ON "+Q+"(scope,epoch,done,depth,fid)",
-  "CREATE TABLE IF NOT EXISTS "+I+" (scope TEXT NOT NULL, epoch INTEGER NOT NULL, fid TEXT NOT NULL, full_path TEXT NOT NULL, folder TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, day TEXT NOT NULL, date_source TEXT NOT NULL, size INTEGER NOT NULL, tag TEXT NOT NULL, thumb_enc TEXT NOT NULL, shuffle INTEGER NOT NULL, source_updated TEXT NOT NULL DEFAULT '', thumb_checked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope,fid))",
+  "CREATE TABLE IF NOT EXISTS "+I+" (scope TEXT NOT NULL, epoch INTEGER NOT NULL, fid TEXT NOT NULL, full_path TEXT NOT NULL, folder TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, day TEXT NOT NULL, date_source TEXT NOT NULL, size INTEGER NOT NULL, tag TEXT NOT NULL, thumb_enc TEXT NOT NULL, shuffle INTEGER NOT NULL, source_updated TEXT NOT NULL DEFAULT '', thumb_checked INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0, PRIMARY KEY(scope,fid))",
   "CREATE INDEX IF NOT EXISTS private_gallery_date ON "+I+"(scope,epoch,day DESC,fid)",
   "CREATE INDEX IF NOT EXISTS private_gallery_shuffle ON "+I+"(scope,epoch,shuffle,fid)",
   "CREATE INDEX IF NOT EXISTS private_gallery_stream ON "+I+"(scope,day DESC,fid)",
@@ -56,7 +57,7 @@ async function contextForOwner(env:any,user:any) {
   const allowed=(p:string)=>under(p,GALLERY_ROOT)&&!excluded.some(x=>under(p,x))
   if(!allowed(GALLERY_ROOT)) return null
   const scope=await sha256(JSON.stringify(["private-gallery-v1",user.id,storage.id,storage.modified,GALLERY_ROOT,excluded]))
-  return {db,storage,scope,allowed,secret:await getJwtSecret({env})}
+  return {db,storage,scope,allowed,hasProtectedSubtree:excluded.some(p=>under(p,GALLERY_ROOT)),secret:await getJwtSecret({env})}
 }
 type GalleryCtx=NonNullable<Awaited<ReturnType<typeof context>>>
 async function getState(g:GalleryCtx) {
@@ -162,7 +163,7 @@ async function scanStep(g:GalleryCtx,force=false) {
     const fids=result.files.map(f=>f.fid).filter(safeFid)
     const old=new Map<string,any>()
     // D1 bound parameters <100; two indexed lookups for a full 100-record page.
-    for(let i=0;i<fids.length;i+=90){const ids=fids.slice(i,i+90);for(const x of await rows(g.db,"SELECT fid,epoch,full_path,folder,name,kind,day,date_source,size,tag,source_updated,thumb_checked,CASE WHEN thumb_enc<>'' THEN 1 ELSE 0 END AS has_thumb FROM "+I+" WHERE scope=? AND fid IN ("+ids.map(()=>"?").join(",")+")",g.scope,...ids))old.set(x.fid,x)}
+    for(let i=0;i<fids.length;i+=90){const ids=fids.slice(i,i+90);for(const x of await rows(g.db,"SELECT fid,epoch,full_path,folder,name,kind,day,date_source,size,tag,source_updated,thumb_checked,duration_seconds,CASE WHEN thumb_enc<>'' THEN 1 ELSE 0 END AS has_thumb FROM "+I+" WHERE scope=? AND fid IN ("+ids.map(()=>"?").join(",")+")",g.scope,...ids))old.set(x.fid,x)}
     const key=await deriveConfigEncryptionKey("private-gallery-v1:"+g.secret)
     const children:any[][]=[],media:any[][]=[],unchanged:string[]=[]
     let changes=0,newFolders=0
@@ -174,11 +175,12 @@ async function scanStep(g:GalleryCtx,force=false) {
       const kind=mediaKind(f.filename);if(!kind)return null
       const prev=old.get(f.fid),date=mediaDate(f,task.path),tag=mediaTags(f)[0]||"",thumb=safeThumb(f.thumbnail_url),sz=Math.max(0,Math.floor(Number(f.size)||0))
       const updated=String(f.updated_at??"")+":"+String(f.created_at??"")
-      const same=!!prev&&prev.full_path===path&&prev.kind===kind&&prev.day===date.day&&prev.date_source===date.date_source&&Number(prev.size)===sz&&prev.tag===tag&&prev.source_updated===updated
+      const duration=kind==="video"?(mediaDurationSeconds(f)||Number(prev?.duration_seconds)||0):0
+      const same=!!prev&&prev.full_path===path&&prev.kind===kind&&prev.day===date.day&&prev.date_source===date.date_source&&Number(prev.size)===sz&&prev.tag===tag&&prev.source_updated===updated&&Number(prev.duration_seconds||0)===duration
       const refreshThumb=!prev||!same||(!prev.has_thumb&&!!thumb)||(!!thumb&&now-Number(prev.thumb_checked||0)>=THUMB_REFRESH_MS)
       if(same&&!refreshThumb)return {same:f.fid,epoch:Number(prev.epoch)}
       const encrypted=thumb?await encryptConfigValue(thumb,key):""
-      return {changed:!same,media:[g.scope,s.epoch,f.fid,path,task.path,f.filename,kind,date.day,date.date_source,sz,tag,encrypted,stableHash(f.fid),updated,now]}
+      return {changed:!same,media:[g.scope,s.epoch,f.fid,path,task.path,f.filename,kind,date.day,date.date_source,sz,tag,encrypted,stableHash(f.fid),updated,now,duration]}
     }))
     const dirs=found.filter(x=>x?.dir).map(x=>x!.dir!)
     if(recent&&dirs.length){
@@ -192,7 +194,7 @@ async function scanStep(g:GalleryCtx,force=false) {
     const due=now+(task.fid==="0"?6*HOUR:changes||newFolders?6*HOUR:72*HOUR)
     const batch=[
       ...bulk(g.db,Q,recent?["scope","epoch","fid","path","depth","done","next_check"]:["scope","epoch","fid","path","depth"],children,recent?"ON CONFLICT(scope,epoch,fid) DO UPDATE SET path=excluded.path,depth=excluded.depth,next_check=0,recent_page=0 WHERE "+Q+".path<>excluded.path":"ON CONFLICT(scope,epoch,fid) DO NOTHING",g.scope,lease),
-      ...bulk(g.db,I,["scope","epoch","fid","full_path","folder","name","kind","day","date_source","size","tag","thumb_enc","shuffle","source_updated","thumb_checked"],media,"ON CONFLICT(scope,fid) DO UPDATE SET epoch=excluded.epoch,full_path=excluded.full_path,folder=excluded.folder,name=excluded.name,kind=excluded.kind,day=excluded.day,date_source=excluded.date_source,size=excluded.size,tag=excluded.tag,thumb_enc=CASE WHEN excluded.thumb_enc='' AND "+I+".full_path=excluded.full_path THEN "+I+".thumb_enc ELSE excluded.thumb_enc END,shuffle=excluded.shuffle,source_updated=excluded.source_updated,thumb_checked=excluded.thumb_checked",g.scope,lease),
+      ...bulk(g.db,I,["scope","epoch","fid","full_path","folder","name","kind","day","date_source","size","tag","thumb_enc","shuffle","source_updated","thumb_checked","duration_seconds"],media,"ON CONFLICT(scope,fid) DO UPDATE SET epoch=excluded.epoch,full_path=excluded.full_path,folder=excluded.folder,name=excluded.name,kind=excluded.kind,day=excluded.day,date_source=excluded.date_source,size=excluded.size,tag=excluded.tag,thumb_enc=CASE WHEN excluded.thumb_enc='' AND "+I+".full_path=excluded.full_path THEN "+I+".thumb_enc ELSE excluded.thumb_enc END,shuffle=excluded.shuffle,source_updated=excluded.source_updated,thumb_checked=excluded.thumb_checked,duration_seconds=excluded.duration_seconds",g.scope,lease),
     ]
     // Full reconciliation needs only a seen-generation marker for unchanged
     // files; incremental scans do not write those media records at all.
@@ -262,7 +264,7 @@ async function serialize(c:any,g:GalleryCtx,items:IndexedMedia[],epoch?:number) 
   const key=await deriveConfigEncryptionKey("private-gallery-v1:"+g.secret)
   return Promise.all(visible.map(async f=>({
     id:f.fid, name:f.name, full_path:f.full_path, folder:f.folder, kind:f.kind, size:f.size,
-    day:f.day,date_source:f.date_source,tag:f.tag,is_dir:false,live:live.has(f.fid),
+    day:f.day,date_source:f.date_source,tag:f.tag,is_dir:false,live:live.has(f.fid),duration:Number(f.duration_seconds||0),
     thumb:f.thumb_enc?await decryptConfigValue(f.thumb_enc,key).then(safeThumb).catch(()=>""):"",
     sign:await signDownloadPath(c,f.full_path,900),
   })))
@@ -304,6 +306,32 @@ galleryMemoryRouter.post("/memory-items",async(c)=>{
     const byId=new Map(items.map(f=>[f.fid,f]))
     return ok(c,{items:await serialize(c,g,ids.map(id=>byId.get(id)).filter(Boolean),visibleEpoch(s))})
   }catch{return fail(c,"暂时无法读取回忆，请稍后重试。",503)}
+})
+// Private, authenticated link resolution by indexed FID. No recursive listing,
+// no public token endpoint, no media proxy, and no bypass of protected subtrees.
+galleryMemoryRouter.post("/media-link",async(c)=>{
+  let stage="INDEX_LOOKUP"
+  try{
+    const g=await context(c);if(!g)return fail(c,"无权读取相册。",403)
+    const body=await c.req.json().catch(()=>({}))
+    if(!safeFid(body.fid)||typeof body.path!=="string")return fail(c,"无效的媒体标识。")
+    if(g.hasProtectedSubtree||!!Number(g.storage.web_proxy)||String(g.storage.webdav_policy||"302_redirect")!=="302_redirect")return fail(c,"此挂载使用原有路径验证。",409)
+    const s=await getState(g);if(!s)return fail(c,"媒体索引尚未建立。",404)
+    const f=await first(g.db,"SELECT fid,full_path,kind,size,duration_seconds FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,visibleEpoch(s))
+    if(!f||!g.allowed(f.full_path)||f.full_path!==body.path)return fail(c,"媒体已移动、删除或需要重新同步。",404)
+    stage="QUARK_LINK"
+    const driver=await getDriver(g.storage.driver,g.storage)
+    if(!(driver instanceof DriverQuarkUcTv))return fail(c,"存储配置已变化。",409)
+    const url=await driver.getIndexedMediaUrl(f.fid,f.kind==="video"&&Number(f.size)>0)
+    const secure=safeThumb(url);if(!secure)return fail(c,"夸克未返回可用的 HTTPS 媒体链接。",502)
+    assertSafeUrl(secure,"Gallery media link",getTrustedHosts(g.storage.addition,c.env))
+    return ok(c,{url:secure,duration:Number(f.duration_seconds||0)})
+  }catch(e:any){
+    const raw=String(e?.diagnostic||"")
+    const diagnostic=/^[A-Z0-9_]{1,100}$/.test(raw)?raw:stage==="INDEX_LOOKUP"?"INDEX_UNAVAILABLE":"MEDIA_LINK_UNAVAILABLE"
+    console.warn("[GalleryMedia] "+diagnostic)
+    return fail(c,stage==="INDEX_LOOKUP"?"索引暂时繁忙，请重试 ("+diagnostic+")":"夸克直链暂时不可用，请重试 ("+diagnostic+")",stage==="INDEX_LOOKUP"?503:502)
+  }
 })
 // Resolve one potential companion only when a still image is opened.
 galleryMemoryRouter.post("/live-pair",async(c)=>{

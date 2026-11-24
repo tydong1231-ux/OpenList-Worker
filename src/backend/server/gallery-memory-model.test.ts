@@ -34,3 +34,13 @@ test("Live Photo pairing is local, same-day, unambiguous and keeps the original 
   assert.equal(chooseLivePair(photo,[video,{...video,fid:"v2"}]),undefined)
   assert.equal(chooseLivePair(photo,[{...video,size:101*1024*1024}]),undefined)
 })
+
+
+import {mediaDurationSeconds} from "./gallery-memory-model"
+test("duration only uses known units or explicit time strings",()=>{
+ assert.equal(mediaDurationSeconds({duration_ms:123456}),123.456)
+ assert.equal(mediaDurationSeconds({video_info:{duration_seconds:12.5}}),12.5)
+ assert.equal(mediaDurationSeconds({duration:"01:02:03"}),3723)
+ assert.equal(mediaDurationSeconds({duration:10000}),0)
+ assert.equal(mediaDurationSeconds({duration:"00:99"}),0)
+})

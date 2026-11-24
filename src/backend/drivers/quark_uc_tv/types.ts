@@ -4,6 +4,8 @@
 export interface DriverQuarkUcTvAddition {
   refresh_token: string
   access_token?: string
+  /** Explicit per-mount consent to the upstream legacy plaintext token endpoint. */
+  allow_insecure_token_http?: boolean
   device_id?: string
   order_by?: string // "file_name" | "updated_at"
   order_direction?: string // "asc" | "desc"

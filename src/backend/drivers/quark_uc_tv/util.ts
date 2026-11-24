@@ -264,15 +264,20 @@ export class ClientQuarkUcTv {
   private async exchangeToken(credential: { code: string } | { refresh_token: string }): Promise<void> {
     const { reqId } = await this.generateSign("POST", "/token")
     let resp: Response
+    // The upstream Go driver uses HTTP. Only use it with explicit per-mount
+    // consent. Never downgrade HTTPS automatically or forward to other hosts.
+    const insecure = this.addition.allow_insecure_token_http === true
+    const endpoint = new URL(this.conf.codeApi + "/token")
+    if (endpoint.hostname !== "api.extscreen.com") throw new QuarkTvError("TOKEN_INVALID_ENDPOINT", "授权服务地址异常")
+    if (insecure) endpoint.protocol = "http:"
     try {
-      // No plaintext fallback for authorization credentials.
-      resp = await fetch(`${this.conf.codeApi}/token`, {
+      resp = await fetch(endpoint.toString(), {
         method: "POST", redirect: "error", signal: AbortSignal.timeout(12000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ req_id: reqId, ...this.deviceQuery(), ...credential }),
       })
     } catch {
-      throw new QuarkTvError("TOKEN_HTTPS_UNAVAILABLE", "授权服务 HTTPS 连接失败")
+      throw new QuarkTvError(insecure ? "TOKEN_HTTP_UNAVAILABLE" : "TOKEN_HTTPS_UNAVAILABLE", insecure ? "原版 HTTP 授权服务连接失败" : "授权服务 HTTPS 连接失败；如接受明文传输风险，可重新生成二维码并勾选原版 HTTP 兼容模式")
     }
     const data: any = await resp.json().catch(() => ({}))
     if (!resp.ok || data?.code !== 200)

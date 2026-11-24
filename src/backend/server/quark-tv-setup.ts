@@ -6,7 +6,7 @@ import { getDb, saveDb, isEncryptionReady } from "../internal/model/db"
 import { getJwtSecret } from "./middlewares"
 import { sha256 } from "../pkg/crypto"
 
-type State = { path: string; deviceId: string; queryToken: string; exp: number; owner: string; existingId?: number; existingModified?: string }
+type State = { path: string; deviceId: string; queryToken: string; exp: number; allowInsecureTokenHttp?: boolean; owner: string; existingId?: number; existingModified?: string }
 const enc = new TextEncoder()
 const dec = new TextDecoder()
 async function stateKey(c: Context) {
@@ -83,7 +83,7 @@ quarkTvSetupRouter.post("/start", async (c) => {
     const qr = normalizeQrImage(result.qrData)
     stage = "QR_STATE_ENCRYPTION"
     const state = await sealState(c, {
-      path, deviceId: result.deviceId, queryToken: result.queryToken, exp: Date.now() + 180000, owner: await owner(c),
+      path, deviceId: result.deviceId, queryToken: result.queryToken, exp: Date.now() + 180000, owner: await owner(c), allowInsecureTokenHttp: body.allow_insecure_token_http === true,
       ...(existing ? { existingId: existing.id, existingModified: String(existing.modified || "") } : {}),
     })
     return c.json({ code: 200, data: { qr, state, expires_in: 180 } })
@@ -100,7 +100,7 @@ quarkTvSetupRouter.post("/finish", async (c) => {
   if (!(await isEncryptionReady(c.env))) return c.json({ code: 503, message: "数据库加密密钥未配置" }, 503)
   const before = await getDb(c.env)
   if (!allowed(matches(before, state.path), state)) return c.json({ code: 409, message: "挂载配置已变化，请重新生成二维码。" }, 409)
-  const addition: DriverQuarkUcTvAddition = { variant: "quark", refresh_token: "", device_id: state.deviceId, order_by: "file_name", order_direction: "asc", link_method: "download" }
+  const addition: DriverQuarkUcTvAddition = { variant: "quark", refresh_token: "", device_id: state.deviceId, order_by: "file_name", order_direction: "asc", link_method: "download", allow_insecure_token_http: state.allowInsecureTokenHttp === true }
   const client = new ClientQuarkUcTv(addition)
   try {
     await client.completeLogin(state.queryToken)

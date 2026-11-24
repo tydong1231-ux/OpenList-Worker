@@ -50,6 +50,20 @@ const CONFS: Record<"quark" | "uc", Conf> = {
   },
 }
 
+// Safe diagnostic codes contain no upstream URLs, bodies, QR data or credentials.
+export class QuarkTvError extends Error {
+  constructor(public readonly diagnostic: string, message: string) {
+    super(message)
+    this.name = "QuarkTvError"
+  }
+}
+function numericStatus(v: unknown): string {
+  return (typeof v === "number" || typeof v === "string") && /^-?\d{1,9}$/.test(String(v)) ? String(v) : "unknown"
+}
+function objectData(v: any): Record<string, any> {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {}
+}
+
 export class ClientQuarkUcTv {
   private conf: Conf
   private addition: DriverQuarkUcTvAddition
@@ -124,21 +138,36 @@ export class ClientQuarkUcTv {
       ...this.deviceQuery(),
       ...extraQuery,
     })
-    const resp = await fetch(`${this.conf.api}${pathname}?${qs.toString()}`, {
-      method,
-      redirect: "error",
-      signal: AbortSignal.timeout(12000),
-      headers: {
-        Accept: "application/json, text/plain, */*",
-        "User-Agent": UA,
-        "x-pan-tm": tm,
-        "x-pan-token": token,
-        "x-pan-client-id": this.conf.clientID,
-      },
-    })
-    const data: QuarkTvCommonResp = await resp
-      .json()
-      .catch(() => ({ status: -1, errno: -1 }) as any)
+    let resp: Response
+    try {
+      resp = await fetch(`${this.conf.api}${pathname}?${qs.toString()}`, {
+        method,
+        redirect: "manual",
+        signal: AbortSignal.timeout(12000),
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          "User-Agent": UA,
+          "x-pan-tm": tm,
+          "x-pan-token": token,
+          "x-pan-client-id": this.conf.clientID,
+        },
+      })
+    } catch (e: any) {
+      const timeout = e?.name === "TimeoutError" || e?.name === "AbortError"
+      throw new QuarkTvError(timeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_NETWORK", timeout ? "夸克接口请求超时" : "无法连接夸克接口")
+    }
+    if (resp.status >= 300 && resp.status < 400) {
+      // Do not follow redirects containing authentication query parameters.
+      throw new QuarkTvError("UPSTREAM_REDIRECT_" + resp.status, "夸克接口返回重定向")
+    }
+    let data: QuarkTvCommonResp
+    try {
+      const parsed = await resp.json()
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid JSON")
+      data = parsed as QuarkTvCommonResp
+    } catch {
+      throw new QuarkTvError("UPSTREAM_NON_JSON_" + resp.status, "夸克接口未返回 JSON")
+    }
     const errInfo = String(data.error_info || "").toLowerCase()
     const tokenInvalid =
       (data.status === -1 && (data.errno === 10001 || data.errno === 11001)) ||
@@ -151,8 +180,10 @@ export class ClientQuarkUcTv {
       await this.refreshToken()
       return this.request<T>(pathname, method, extraQuery, true)
     }
-    if (!resp.ok || data.status >= 400 || (data.errno !== undefined && data.errno !== 0)) {
-      throw new Error(`[QuarkTV] upstream request failed (HTTP ${resp.status}, errno ${Number(data.errno) || 0})`)
+    const status = numericStatus(data.status)
+    const errno = numericStatus(data.errno)
+    if (!resp.ok || Number(data.status) >= 400 || Number(data.status) < 0 || (data.errno !== undefined && Number(data.errno) !== 0)) {
+      throw new QuarkTvError("UPSTREAM_HTTP_" + resp.status + "_STATUS_" + status + "_ERRNO_" + errno, "夸克接口拒绝请求")
     }
     return data as T
   }
@@ -164,20 +195,25 @@ export class ClientQuarkUcTv {
       auth_type: "code", client_id: this.conf.clientID, scope: "netdisk",
       qrcode: "1", qr_width: "460", qr_height: "460",
     }, false, false)
-    if (typeof r.qr_data !== "string" || !r.qr_data || typeof r.query_token !== "string" || !r.query_token) {
-      throw new Error("[QuarkTV] Authorization response did not contain a QR code.")
+    // Go's protocol returns the fields at the root; tolerate nested data too.
+    const nested = objectData(r.data)
+    const qrData = r.qr_data ?? nested.qr_data
+    const queryToken = r.query_token ?? nested.query_token
+    if (typeof qrData !== "string" || !qrData || typeof queryToken !== "string" || !queryToken) {
+      throw new QuarkTvError("QR_FIELDS_MISSING", "夸克接口未返回二维码或授权会话")
     }
-    return { qrData: r.qr_data, queryToken: r.query_token, deviceId: this.deviceId }
+    return { qrData, queryToken, deviceId: this.deviceId }
   }
 
   async completeLogin(queryToken: string): Promise<void> {
     const r = await this.request<any>("/oauth/code", "GET", {
       client_id: this.conf.clientID, scope: "netdisk", query_token: queryToken,
     }, false, false)
-    if (typeof r.code !== "string" || !r.code) {
-      throw new Error("[QuarkTV] Scan and confirm before retrying.")
+    const code = typeof r.code === "string" ? r.code : objectData(r.data).code
+    if (typeof code !== "string" || !code) {
+      throw new QuarkTvError("SCAN_PENDING", "请先扫码并确认授权")
     }
-    await this.exchangeToken({ code: r.code })
+    await this.exchangeToken({ code })
   }
 
   async verifyLogin(): Promise<void> {
@@ -207,14 +243,14 @@ export class ClientQuarkUcTv {
         body: JSON.stringify({ req_id: reqId, ...this.deviceQuery(), ...credential }),
       })
     } catch {
-      throw new Error("[QuarkTV] Secure token exchange endpoint unavailable; please retry.")
+      throw new QuarkTvError("TOKEN_HTTPS_UNAVAILABLE", "授权服务 HTTPS 连接失败")
     }
     const data: any = await resp.json().catch(() => ({}))
     if (!resp.ok || data?.code !== 200)
-      throw new Error("[QuarkTV] Token exchange failed; scan again if authorization expired.")
+      throw new QuarkTvError("TOKEN_HTTP_" + resp.status + "_CODE_" + numericStatus(data?.code), "授权服务拒绝交换凭证")
     const d = data.data || {}
     if (!d.access_token || (!d.refresh_token && !this.addition.refresh_token)) {
-      throw new Error("[QuarkTV] Token exchange returned incomplete credentials.")
+      throw new QuarkTvError("TOKEN_FIELDS_MISSING", "授权服务未返回完整凭证")
     }
     const next = { access_token: String(d.access_token), refresh_token: String(d.refresh_token || this.addition.refresh_token), device_id: this.deviceId }
     Object.assign(this.addition, next)

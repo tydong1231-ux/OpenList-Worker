@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import type { Context } from "hono"
-import { ClientQuarkUcTv } from "../drivers/quark_uc_tv/util"
+import { ClientQuarkUcTv, QuarkTvError } from "../drivers/quark_uc_tv/util"
 import type { DriverQuarkUcTvAddition } from "../drivers/quark_uc_tv/types"
 import { getDb, saveDb, isEncryptionReady } from "../internal/model/db"
 import { getJwtSecret } from "./middlewares"
@@ -44,6 +44,20 @@ function matches(db: any, path: string) {
 function allowed(s: any, state: State) {
   return state.existingId === undefined ? !s : s && isTv(s) && s.id === state.existingId && String(s.modified || "") === state.existingModified
 }
+// Only accept raster QR images; never reflect arbitrary upstream content or URLs.
+export function normalizeQrImage(value: string): string {
+  let base = value.trim().replace(/^data:image\/(?:jpeg|jpg|png);base64,/i, "").replace(/\s/g, "").replace(/-/g, "+").replace(/_/g, "/")
+  if (!base || base.length > 1000000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base)) throw new QuarkTvError("QR_FORMAT", "二维码图片格式无法识别")
+  base = base.replace(/=+$/, "")
+  if (base.length % 4 === 1) throw new QuarkTvError("QR_FORMAT", "二维码图片编码无效")
+  base += "=".repeat((4 - base.length % 4) % 4)
+  const format = base.startsWith("iVBORw0KGgo") ? "png" : base.startsWith("/9j/") ? "jpeg" : ""
+  if (!format) throw new QuarkTvError("QR_FORMAT", "二维码图片不是 PNG 或 JPEG")
+  return "data:image/" + format + ";base64," + base
+}
+function diagnostic(e: unknown, fallback: string) {
+  return e instanceof QuarkTvError ? e.diagnostic : fallback
+}
 export const quarkTvSetupRouter = new Hono()
 quarkTvSetupRouter.use("*", async (c, next) => {
   await next()
@@ -61,18 +75,22 @@ quarkTvSetupRouter.post("/start", async (c) => {
   if (existing && (!isTv(existing) || body.reauthorize !== true)) {
     return c.json({ code: 409, message: "挂载路径已存在，请换一个路径；仅夸克 TV 挂载可以重新授权。" }, 409)
   }
+  let stage = "QR_REQUEST"
   try {
     const client = new ClientQuarkUcTv({ variant: "quark", refresh_token: "" })
     const result = await client.startLogin()
-    const qr = result.qrData.replace(/^data:image\/(?:jpeg|png);base64,/, "").replace(/\s/g, "")
-    if (!/^[A-Za-z0-9+/=]+$/.test(qr) || qr.length > 1000000) throw new Error("Invalid QR image")
+    stage = "QR_FORMAT"
+    const qr = normalizeQrImage(result.qrData)
+    stage = "QR_STATE_ENCRYPTION"
     const state = await sealState(c, {
       path, deviceId: result.deviceId, queryToken: result.queryToken, exp: Date.now() + 180000, owner: await owner(c),
       ...(existing ? { existingId: existing.id, existingModified: String(existing.modified || "") } : {}),
     })
-    return c.json({ code: 200, data: { qr: "data:image/" + (qr.startsWith("iVBOR") ? "png" : "jpeg") + ";base64," + qr, state, expires_in: 180 } })
-  } catch {
-    return c.json({ code: 502, message: "夸克 TV 二维码请求失败，请重试。上游接口可能暂时不可用。" }, 502)
+    return c.json({ code: 200, data: { qr, state, expires_in: 180 } })
+  } catch (e) {
+    const reason = diagnostic(e, stage)
+    console.warn("[QuarkTV] QR start failed", reason)
+    return c.json({ code: 502, message: (e instanceof QuarkTvError ? e.message : "二维码准备失败") + " [" + reason + "]", data: { diagnostic: reason } }, 502)
   }
 })
 quarkTvSetupRouter.post("/finish", async (c) => {
@@ -88,8 +106,10 @@ quarkTvSetupRouter.post("/finish", async (c) => {
     await client.completeLogin(state.queryToken)
     await client.verifyLogin()
   } catch (e: any) {
-    const msg = String(e?.message || "")
-    return c.json({ code: 400, message: msg.includes("Secure token exchange") ? "授权服务 HTTPS 连接失败。为保护登录凭证，不会降级到明文 HTTP。" : "请确认已用夸克 App 扫码并允许授权；如果失败请重新生成二维码。" }, 400)
+    const reason = diagnostic(e, "QR_COMPLETE_FAILED")
+    console.warn("[QuarkTV] QR completion failed", reason)
+    const message = e instanceof QuarkTvError ? e.message : "授权未完成，请确认扫码并重试"
+    return c.json({ code: 400, message: message + " [" + reason + "]", data: { diagnostic: reason } }, 400)
   }
   const db = await getDb(c.env)
   const existing = matches(db, state.path)

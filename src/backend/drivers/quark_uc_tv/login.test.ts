@@ -57,3 +57,17 @@ test("TV authorization exchanges code using the same device and persists rotatio
     assert.deepEqual(calls, ["code", "download", "streaming"])
   } finally { globalThis.fetch = original }
 })
+
+
+test("TV authorization tolerates a nested response and reports sanitized upstream errors", async () => {
+  const original = globalThis.fetch
+  const client = new ClientQuarkUcTv({ variant: "quark", refresh_token: "" })
+  try {
+    globalThis.fetch = (async () => Response.json({ status: 200, errno: "0", data: { qr_data: "aGVsbG8=", query_token: "nested-test" } })) as typeof fetch
+    assert.equal((await client.startLogin()).queryToken, "nested-test")
+    globalThis.fetch = (async () => new Response("<html>private upstream payload</html>", { status: 403 })) as typeof fetch
+    await assert.rejects(client.startLogin(), (e: any) => e.diagnostic === "UPSTREAM_NON_JSON_403" && !e.message.includes("payload"))
+    globalThis.fetch = (async () => { throw new Error("private signed URL") }) as typeof fetch
+    await assert.rejects(client.startLogin(), (e: any) => e.diagnostic === "UPSTREAM_NETWORK" && !e.message.includes("private"))
+  } finally { globalThis.fetch = original }
+})

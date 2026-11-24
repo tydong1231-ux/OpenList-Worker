@@ -141,3 +141,23 @@ test("focal point zoom math and bounded panning",()=>{
  assert.match(galleryJs,/DB_LIMIT/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
+
+
+
+
+test("pinch is the only touch zoom; scale always returns continuously to fit",()=>{
+ assert.ok(!galleryJs.includes("togglePhotoZoomAt"))
+ assert.ok(!galleryJs.includes("z.tap"))
+ assert.ok(!galleryJs.includes("img.ondblclick"))
+ assert.ok(galleryJs.includes("photoPinchScale(a.s,a.distance,distance)"))
+ assert.doesNotThrow(()=>new Script(galleryJs))
+ const a=galleryJs.indexOf("function photoClamp("),b=galleryJs.indexOf("const photoStage=",a)
+ const math=new Function(galleryJs.slice(a,b)+";return {photoPinchScale,photoPose,photoAnchor}")()
+ assert.equal(math.photoPinchScale(1,100,200),2)
+ assert.equal(math.photoPinchScale(2.6,200,60),1)
+ assert.equal(math.photoPinchScale(1,100,80),1)
+ assert.equal(math.photoPinchScale(2,100,200),4)
+ const g={w:400,h:800,fw:400,fh:800}
+ assert.deepEqual(math.photoPose(g,1,120,-80,true),{s:1,x:0,y:0})
+ assert.deepEqual(math.photoAnchor({s:1,x:0,y:0,cx:50,cy:20},2,50,20),{x:-50,y:-20})
+})

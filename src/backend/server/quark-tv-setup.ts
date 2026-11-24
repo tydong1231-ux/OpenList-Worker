@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import type { Context } from "hono"
-import { ClientQuarkUcTv, QuarkTvError } from "../drivers/quark_uc_tv/util"
+import { ClientQuarkUcTv, QuarkTvError, tokenTransportError } from "../drivers/quark_uc_tv/util"
 import type { DriverQuarkUcTvAddition } from "../drivers/quark_uc_tv/types"
 import { getDb, saveDb, isEncryptionReady } from "../internal/model/db"
 import { getJwtSecret } from "./middlewares"
@@ -65,6 +65,36 @@ quarkTvSetupRouter.use("*", async (c, next) => {
   c.header("Pragma", "no-cache")
 })
 quarkTvSetupRouter.get("/ready", (c) => c.json({ code: 200, message: "success" }))
+// Administrator-only fixed-host diagnostics. No QR code, authorization
+// code, cookie or refresh/access token is used or returned.
+quarkTvSetupRouter.post("/probe", async (c) => {
+  const results = await Promise.all(["https", "http"].map(async scheme => {
+    const started = Date.now()
+    try {
+      const response = await fetch(scheme + "://api.extscreen.com/quarkdrive/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        redirect: "manual",
+        signal: AbortSignal.timeout(8000),
+      })
+      const status = response.status
+      // Expose only the protocol and whether the destination is the same host.
+      let redirect: string | undefined
+      if (status >= 300 && status < 400) {
+        try {
+          const url = new URL(response.headers.get("Location") || "", scheme + "://api.extscreen.com/quarkdrive/token")
+          redirect = url.protocol + (url.hostname === "api.extscreen.com" ? " same-host" : " other-host")
+        } catch { redirect = "unknown" }
+      }
+      await response.body?.cancel().catch(() => {})
+      return { protocol: scheme, status, result: status >= 300 && status < 400 ? "REDIRECT" : "REACHABLE", elapsed_ms: Date.now() - started, ...(redirect ? { redirect } : {}) }
+    } catch (e) {
+      return { protocol: scheme, result: tokenTransportError(e), elapsed_ms: Date.now() - started }
+    }
+  }))
+  return c.json({ code: 200, data: results })
+})
 quarkTvSetupRouter.post("/start", async (c) => {
   const body = await c.req.json().catch(() => ({}))
   let path: string

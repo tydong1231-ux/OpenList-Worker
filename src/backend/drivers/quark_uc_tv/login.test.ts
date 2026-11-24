@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { ClientQuarkUcTv } from "./util"
+import { ClientQuarkUcTv, tokenTransportError } from "./util"
 import type { DriverQuarkUcTvAddition } from "./types"
 
 test("TV authorization exchanges code using the same device and persists rotation", async () => {
@@ -85,4 +85,12 @@ test("post-scan errors identify the exact stage and recognize explicit QR expira
     await assert.rejects(client.completeLogin("example-query"), (e: any) => e.diagnostic === "GET_CODE_UPSTREAM_HTTP_400_STATUS_-1_ERRNO_11002")
     await assert.rejects(client.verifyLogin(), (e: any) => e.diagnostic === "VERIFY_UPSTREAM_HTTP_400_STATUS_-1_ERRNO_11002")
   } finally { globalThis.fetch = original }
+})
+
+
+test("classifies transport errors without returning raw credential-bearing messages", () => {
+  assert.equal(tokenTransportError(new Error("DNS lookup failed: private token")), "DNS")
+  assert.equal(tokenTransportError(new Error("TLS certificate error")), "TLS")
+  assert.equal(tokenTransportError(new Error("redirect encountered")), "REDIRECT")
+  assert.equal(tokenTransportError(new Error("secret value")), "NETWORK")
 })

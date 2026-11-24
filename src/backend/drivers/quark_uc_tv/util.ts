@@ -57,6 +57,20 @@ export class QuarkTvError extends Error {
     this.name = "QuarkTvError"
   }
 }
+// Runtime exception messages may contain URLs or credential values. Return
+// only fixed diagnostic categories, never the original exception text.
+export function tokenTransportError(e: unknown): string {
+  const err = e as { name?: string; message?: string; cause?: { code?: string } }
+  const detail = String(err?.name || "") + " " + String(err?.message || "") + " " + String(err?.cause?.code || "")
+  if (/TimeoutError|AbortError|timed?\s*out|ETIMEDOUT/i.test(detail)) return "TIMEOUT"
+  if (/DNS|ENOTFOUND|EAI_AGAIN|resolve host|name resolution/i.test(detail)) return "DNS"
+  if (/TLS|SSL|certificate|handshake|CERT_/i.test(detail)) return "TLS"
+  if (/redirect/i.test(detail)) return "REDIRECT"
+  if (/ECONNREFUSED|connection refused/i.test(detail)) return "REFUSED"
+  if (/ECONNRESET|connection reset|network connection lost/i.test(detail)) return "CONNECTION_LOST"
+  if (/disallowed|not allowed|private address|prohibited|blocked/i.test(detail)) return "BLOCKED"
+  return "NETWORK"
+}
 function numericStatus(v: unknown): string {
   return (typeof v === "number" || typeof v === "string") && /^-?\d{1,9}$/.test(String(v)) ? String(v) : "unknown"
 }
@@ -272,12 +286,16 @@ export class ClientQuarkUcTv {
     if (insecure) endpoint.protocol = "http:"
     try {
       resp = await fetch(endpoint.toString(), {
-        method: "POST", redirect: "error", signal: AbortSignal.timeout(12000),
+        method: "POST", redirect: "manual", signal: AbortSignal.timeout(12000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ req_id: reqId, ...this.deviceQuery(), ...credential }),
       })
-    } catch {
-      throw new QuarkTvError(insecure ? "TOKEN_HTTP_UNAVAILABLE" : "TOKEN_HTTPS_UNAVAILABLE", insecure ? "原版 HTTP 授权服务连接失败" : "授权服务 HTTPS 连接失败；如接受明文传输风险，可重新生成二维码并勾选原版 HTTP 兼容模式")
+    } catch (e) {
+      throw new QuarkTvError("TOKEN_" + (insecure ? "HTTP_" : "HTTPS_") + tokenTransportError(e), "授权服务连接失败，请先使用页面的连接检测，无需重复扫码")
+    }
+    if (resp.status >= 300 && resp.status < 400) {
+      await resp.body?.cancel().catch(() => {})
+      throw new QuarkTvError("TOKEN_REDIRECT_" + resp.status, "授权服务返回重定向；为保护凭证，不自动转发")
     }
     const data: any = await resp.json().catch(() => ({}))
     if (!resp.ok || data?.code !== 200)

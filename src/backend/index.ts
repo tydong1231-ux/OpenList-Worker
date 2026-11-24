@@ -1,4 +1,6 @@
 import { Hono } from "hono"
+import { HTTPException } from "hono/http-exception"
+import { galleryErrorCode } from "./server/gallery-memory-model"
 import { galleryHtml, galleryCss, galleryJs } from "./server/gallery-ui"
 import { galleryManifest, galleryServiceWorker, galleryIcon } from "./server/gallery-pwa"
 import { quarkTvSetupPage, quarkTvSetupScript } from "./server/quark-tv-setup-page"
@@ -18,6 +20,16 @@ import { getStoreConfigErrorDetail } from "./internal/model/store/backend"
 import { storageErrorSummary, uiStorageError } from "./server/storage-error"
 
 const app = new Hono()
+app.onError((err,c)=>{
+  if(err instanceof HTTPException)return err.getResponse()
+  if(c.req.path.startsWith("/api/admin/gallery-memory/")){
+    const code=galleryErrorCode(err),ray=(c.req.header("cf-ray")||"").match(/^[a-zA-Z0-9-]{1,40}$/)?.[0]||""
+    console.warn("[GalleryRequest] "+code)
+    return c.json({code:503,message:"相册服务暂时繁忙 ("+code+")",diagnostic:code,ray,data:null},503,{"Cache-Control":"no-store, private"})
+  }
+  console.error(err)
+  return c.text("Internal Server Error",500)
+})
 
 /**
  * 静态资源 / SPA 壳路径：这些请求不应被存储配置错误拦截，
@@ -184,10 +196,10 @@ const serveGallery = (c: any) => {
 app.get("/", serveGallery)
 app.get("/@gallery", serveGallery)
 app.get("/@gallery.css", (c) => c.body(galleryCss, 200, {
-  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-codecs10" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-gesture12" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 app.get("/@gallery.js", (c) => c.body(galleryJs, 200, {
-  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-codecs10" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-gesture12" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 
 // Dedicated PWA assets; official OpenList manifest and frontend are untouched.

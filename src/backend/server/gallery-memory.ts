@@ -5,9 +5,8 @@ import { DriverQuarkUcTv } from "../drivers/quark_uc_tv/driver"
 import { getDisableIndex } from "../internal/driver/storageopts"
 import { getUserFromContext, getJwtSecret } from "./middlewares"
 import { deriveConfigEncryptionKey, encryptConfigValue, decryptConfigValue, sha256 } from "../pkg/crypto"
-import { signDownloadPath } from "../pkg/sign"
 import { assertSafeUrl, getTrustedHosts } from "../pkg/http"
-import { GALLERY_ROOT, safeName, safeFid, mediaKind, mediaDate, mediaTags, safeThumb, stableHash, buildMemoryGroups, liveStillStem, chooseLivePair, mediaDurationSeconds, type IndexedMedia } from "./gallery-memory-model"
+import { GALLERY_ROOT, safeName, safeFid, mediaKind, mediaDate, mediaTags, safeThumb, stableHash, buildMemoryGroups, liveStillStem, chooseLivePair, mediaDurationSeconds, galleryErrorCode, type IndexedMedia } from "./gallery-memory-model"
 
 export const galleryMemoryRouter = new Hono()
 // Only one Quark page per step. No timers/cron or image/video downloads on the server.
@@ -29,7 +28,8 @@ const schema = [
   "CREATE TABLE IF NOT EXISTS "+B+" (day TEXT PRIMARY KEY, pages INTEGER NOT NULL DEFAULT 0, write_units INTEGER NOT NULL DEFAULT 0)",
 ]
 const ok=(c:any,data:any)=>c.json({code:200,message:"success",data})
-const fail=(c:any,msg:string,status:400|401|403|409|429|500|503=400)=>c.json({code:status,message:msg,data:null},status)
+const fail=(c:any,msg:string,status:400|401|403|404|409|429|500|502|503=400)=>c.json({code:status,message:msg,data:null},status)
+const galleryFailure=(c:any,e:unknown,message:string)=>{const code=galleryErrorCode(e);console.warn("[GalleryRead] "+code);return c.json({code:503,message:message+" ("+code+")",diagnostic:code,ray:(c.req.header("cf-ray")||"").match(/^[a-zA-Z0-9-]{1,40}$/)?.[0]||"",data:null},503)}
 const norm=(p:any)=>"/"+String(p||"").split("/").filter(Boolean).join("/")
 const under=(p:string,root:string)=>root==="/"||p===root||p.startsWith(root+"/")
 const utcDay=()=>new Date().toISOString().slice(0,10)
@@ -266,25 +266,45 @@ async function serialize(c:any,g:GalleryCtx,items:IndexedMedia[],epoch?:number) 
     id:f.fid, name:f.name, full_path:f.full_path, folder:f.folder, kind:f.kind, size:f.size,
     day:f.day,date_source:f.date_source,tag:f.tag,is_dir:false,live:live.has(f.fid),duration:Number(f.duration_seconds||0),
     thumb:f.thumb_enc?await decryptConfigValue(f.thumb_enc,key).then(safeThumb).catch(()=>""):"",
-    sign:await signDownloadPath(c,f.full_path,900),
+    // Obtain short-lived links only for selected files through the authenticated media-link API.
+    sign:"",
   })))
+}
+// Reuse the existing (scope,epoch,shuffle,fid) index with equality on epoch.
+// During reconciliation there are at most two visible generations.
+async function sampleShuffle(g:GalleryCtx,s:any,cols:string,pivot:number,after:boolean,limit:number){
+  const epochs=Array.from(new Set([visibleEpoch(s),Number(s.epoch)]))
+  const samples=await Promise.all(epochs.map(epoch=>rows(g.db,"SELECT "+cols+" FROM "+I+" INDEXED BY private_gallery_shuffle WHERE scope=? AND epoch=? AND shuffle"+(after?">=":"<")+"? ORDER BY shuffle,fid LIMIT "+limit,g.scope,epoch,pivot)))
+  return samples.flat().sort((a,b)=>Number(a.shuffle)-Number(b.shuffle)||(a.fid<b.fid?-1:a.fid>b.fid?1:0)).slice(0,limit)
+}
+const statsCache=new Map<string,{key:string;value:any[];until:number}>()
+async function readGalleryStats(g:GalleryCtx,epoch:number,revision:string){
+  const cached=statsCache.get(g.scope)
+  if(cached?.key===revision&&cached.until>Date.now())return cached.value
+  const value=await rows(g.db,"SELECT substr(day,1,7) AS month,kind,COUNT(*) AS n,COALESCE(SUM(CASE WHEN tag<>'' THEN 1 ELSE 0 END),0) AS tagged FROM "+I+" WHERE scope=? AND epoch>=? GROUP BY month,kind ORDER BY month DESC",g.scope,epoch)
+  statsCache.set(g.scope,{key:revision,value,until:Date.now()+15*60*1000})
+  while(statsCache.size>4)statsCache.delete(statsCache.keys().next().value!)
+  return value
 }
 galleryMemoryRouter.get("/feed",async(c)=>{
   try{
     const g=await context(c);if(!g)return fail(c,"此相册索引仅支持已授权的私人夸克 TV 根目录。",403)
-    const s=await ensure(g)
+    const s=await getState(g)
+    if(!s)return ok(c,{pages:0,done:false,remaining_today:0,total:0,tagged:0,months:[],cards:[],epoch:1,revision:0})
     const day=String(c.req.query("day")||"").match(/^(19|20)\d{2}-\d{2}-\d{2}$/)?.[0]||utcDay()
     const nonce=String(c.req.query("seed")||"0").slice(0,32),seed=day+":"+nonce
     const pivot=stableHash(seed)
     const year=Number(day.slice(0,4)),ann=[1,2,3,4,5].map(i=>String(year-i)+day.slice(4))
     const minEpoch=visibleEpoch(s)
-    const groupCols="fid,folder,day,kind,tag,CASE WHEN thumb_enc<>'' THEN '1' ELSE '' END AS thumb_enc"
+    const groupCols="fid,folder,day,kind,tag,shuffle,CASE WHEN thumb_enc<>'' THEN '1' ELSE '' END AS thumb_enc"
+    const statsRevision=g.scope.slice(0,16)+":"+[s.epoch,s.pages,s.done,s.revision].join(":")
+    const needStats=c.req.query("stats_rev")!==statsRevision
     const [recent,after,before,anniversary,months]=await Promise.all([
       rows(g.db,"SELECT "+groupCols+" FROM "+I+" WHERE scope=? AND epoch>=? ORDER BY day DESC,fid LIMIT 64",g.scope,minEpoch),
-      rows(g.db,"SELECT "+groupCols+" FROM "+I+" WHERE scope=? AND epoch>=? AND shuffle>=? ORDER BY shuffle,fid LIMIT 112",g.scope,minEpoch,pivot),
-      rows(g.db,"SELECT "+groupCols+" FROM "+I+" WHERE scope=? AND epoch>=? AND shuffle<? ORDER BY shuffle,fid LIMIT 64",g.scope,minEpoch,pivot),
+      sampleShuffle(g,s,groupCols,pivot,true,112),
+      sampleShuffle(g,s,groupCols,pivot,false,64),
       rows(g.db,"SELECT "+groupCols+" FROM "+I+" WHERE scope=? AND epoch>=? AND day IN (?,?,?,?,?) ORDER BY day DESC,fid LIMIT 32",g.scope,minEpoch,...ann),
-      rows(g.db,"SELECT substr(day,1,7) AS month,kind,COUNT(*) AS n,COALESCE(SUM(CASE WHEN tag<>'' THEN 1 ELSE 0 END),0) AS tagged FROM "+I+" WHERE scope=? AND epoch>=? GROUP BY month,kind ORDER BY month DESC",g.scope,minEpoch)
+      needStats?readGalleryStats(g,minEpoch,statsRevision):Promise.resolve(null)
     ])
     const groups=buildMemoryGroups(recent,after.concat(before),anniversary,seed)
     // Homepage serializes only one cover per group. Other thumbnails and signed
@@ -293,19 +313,20 @@ galleryMemoryRouter.get("/feed",async(c)=>{
     const covers=coverIds.length?await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND fid IN ("+coverIds.map(()=>"?").join(",")+")",g.scope,minEpoch,...coverIds):[]
     const coverMap=new Map((await serialize(c,g,covers,minEpoch)).map(f=>[f.id,f]))
     const cards=groups.map(group=>({id:group.id,title:group.title,subtitle:group.subtitle,count:group.items.length,ids:group.items.map(f=>f.fid),cover:coverMap.get(group.items[0].fid)||null}))
-    return ok(c,{...publicState(s),total:months.reduce((n,m)=>n+Number(m.n||0),0),tagged:months.reduce((n,m)=>n+Number(m.tagged||0),0),months:months.map(m=>({month:m.month,kind:m.kind,count:Number(m.n)})),cards})
-  }catch{return fail(c,"暂时无法读取相册索引，请稍后重试。",503)}
+    return ok(c,{...publicState(s),stats_revision:statsRevision,total:months?months.reduce((n,m)=>n+Number(m.n||0),0):null,tagged:months?months.reduce((n,m)=>n+Number(m.tagged||0),0):null,months:months?months.map(m=>({month:m.month,kind:m.kind,count:Number(m.n)})):null,cards})
+  }catch(e){return galleryFailure(c,e,"暂时无法读取相册索引，请稍后重试。")}
 })
 galleryMemoryRouter.post("/memory-items",async(c)=>{
   try{
     const g=await context(c);if(!g)return fail(c,"无权访问回忆。",403)
     const body=await c.req.json().catch(()=>({}))
     if(!Array.isArray(body.ids)||body.ids.length<1||body.ids.length>32||!body.ids.every(safeFid))return fail(c,"无效的回忆文件列表。")
-    const ids=[...new Set<string>(body.ids)],s=await ensure(g)
+    const ids=[...new Set<string>(body.ids)],s=await getState(g)
+    if(!s)return ok(c,{items:[]})
     const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND fid IN ("+ids.map(()=>"?").join(",")+")",g.scope,visibleEpoch(s),...ids)
     const byId=new Map(items.map(f=>[f.fid,f]))
     return ok(c,{items:await serialize(c,g,ids.map(id=>byId.get(id)).filter(Boolean),visibleEpoch(s))})
-  }catch{return fail(c,"暂时无法读取回忆，请稍后重试。",503)}
+  }catch(e){return galleryFailure(c,e,"暂时无法读取回忆，请稍后重试。")}
 })
 // Limited, authenticated byte transport ONLY for compatible image decoding
 // when the original CDN disallows browser CORS. Never buffer or store originals
@@ -369,13 +390,14 @@ galleryMemoryRouter.post("/live-pair",async(c)=>{
     const g=await context(c);if(!g)return fail(c,"无权访问实况照片。",403)
     const body=await c.req.json().catch(()=>({}))
     if(!safeFid(body.fid))return fail(c,"无效的照片 ID。")
-    const s=await ensure(g),epoch=visibleEpoch(s)
+    const s=await getState(g);if(!s)return ok(c,{item:null})
+    const epoch=visibleEpoch(s)
     const still=await first(g.db,"SELECT fid,folder,full_path,name,kind,day FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,epoch)
     if(!still||!g.allowed(still.full_path)||still.kind!=="image"||!liveStillStem(still.name))return ok(c,{item:null})
     const candidates=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND folder=? AND kind='video' AND name COLLATE NOCASE=? AND epoch>=? AND day=? AND size>0 AND size<=104857600 LIMIT 3",g.scope,still.folder,liveStillStem(still.name)+".mov",epoch,still.day)
     const pair=chooseLivePair(still,candidates.filter(f=>g.allowed(f.full_path)))
     return ok(c,{item:pair?(await serialize(c,g,[pair]))[0]:null,match:pair?"same-name-and-day":null})
-  }catch{return fail(c,"暂时无法检查实况照片。",503)}
+  }catch(e){return galleryFailure(c,e,"暂时无法检查实况照片。")}
 })
 // Fixed sort expressions, all client inputs bound; stable keyset cursor avoids OFFSET scans.
 export function timelineQuery(params: {sort?:string;kind?:string;month?:string;q?:string;key?:string;fid?:string}) {
@@ -392,20 +414,35 @@ export function timelineQuery(params: {sort?:string;kind?:string;month?:string;q
   }
   const q=String(params.q||"").trim().slice(0,120)
   if(q){filters.push("(instr(lower(name),lower(?))>0 OR instr(lower(folder),lower(?))>0 OR instr(lower(tag),lower(?))>0)");args.push(q,q,q)}
+  const baseWhere=filters.length?" AND "+filters.join(" AND "):"",baseArgs=args.slice()
   const key=params.key
+  let cursor:{key:string;fid:string}|null=null
   if(safeFid(params.fid)&&typeof key==="string"&&key.length<=512){
     const valid=sort==="size"?/^\d{1,16}$/.test(key):sort==="name"?key.length>0:/^\d{4}-\d{2}-\d{2}$/.test(key)
-    if(valid){const value=sort==="size"?Number(key):key;filters.push("("+col+(desc?"<?":">?")+" OR ("+col+"=? AND fid>?))");args.push(value,value,params.fid)}
+    if(valid){cursor={key,fid:params.fid!};const value=sort==="size"?Number(key):key;filters.push("("+col+(desc?"<?":">?")+" OR ("+col+"=? AND fid>?))");args.push(value,value,params.fid)}
   }
-  return {sort,where:filters.length?" AND "+filters.join(" AND "):"",args,order:col+(desc?" DESC":" ASC")+",fid ASC",key:(f:IndexedMedia)=>String(sort==="name"?f.name:sort==="size"?f.size:sort==="old"&&f.day==="0000-00-00"?"9999-99-99":f.day)}
+  return {sort,baseWhere,baseArgs,cursor,where:filters.length?" AND "+filters.join(" AND "):"",args,order:col+(desc?" DESC":" ASC")+",fid ASC",key:(f:IndexedMedia)=>String(sort==="name"?f.name:sort==="size"?f.size:sort==="old"&&f.day==="0000-00-00"?"9999-99-99":f.day)}
 }
 galleryMemoryRouter.get("/timeline",async(c)=>{
   try{
     const g=await context(c);if(!g)return fail(c,"无权访问相册索引。",403)
-    const s=await ensure(g)
+    const s=await getState(g)
+    if(!s)return ok(c,{items:[],next:null,epoch:1})
     const plan=timelineQuery({sort:c.req.query("sort"),kind:c.req.query("kind"),month:c.req.query("month"),q:c.req.query("q"),key:c.req.query("key")||c.req.query("day"),fid:c.req.query("fid")})
-    const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=?"+plan.where+" ORDER BY "+plan.order+" LIMIT "+(PAGE_SIZE+1),g.scope,visibleEpoch(s),...plan.args)
+    const kind=c.req.query("kind")
+    const indexed=kind==="image"||kind==="video"?"private_gallery_stream_kind":"private_gallery_stream"
+    const limit=PAGE_SIZE+1,minEpoch=visibleEpoch(s)
+    let items:any[]
+    if(plan.sort==="new"){
+      const base="SELECT * FROM "+I+" INDEXED BY "+indexed+" WHERE scope=? AND epoch>=?"+plan.baseWhere
+      const args=[g.scope,minEpoch,...plan.baseArgs],order=" ORDER BY day DESC,fid ASC LIMIT "
+      if(plan.cursor){
+        const same=await rows(g.db,base+" AND day=? AND fid>?"+order+limit,...args,plan.cursor.key,plan.cursor.fid)
+        const rest=same.length<limit?await rows(g.db,base+" AND day<?"+order+(limit-same.length),...args,plan.cursor.key):[]
+        items=same.concat(rest)
+      }else items=await rows(g.db,base+order+limit,...args)
+    }else items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=?"+plan.where+" ORDER BY "+plan.order+" LIMIT "+limit,g.scope,minEpoch,...plan.args)
     const page=items.slice(0,PAGE_SIZE),last=page[page.length-1]
     return ok(c,{items:await serialize(c,g,page,visibleEpoch(s)),next:items.length>PAGE_SIZE&&last?{key:plan.key(last),fid:last.fid}:null,epoch:Number(s.epoch)})
-  }catch{return fail(c,"暂时无法读取照片，请稍后重试。",503)}
+  }catch(e){return galleryFailure(c,e,"暂时无法读取照片，请稍后重试。")}
 })

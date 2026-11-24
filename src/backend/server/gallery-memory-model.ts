@@ -119,3 +119,15 @@ export function mediaDurationSeconds(f:any):number {
   }
   return 0
 }
+
+
+export function galleryErrorCode(err:unknown) {
+  const s=String((err as any)?.message||"")
+  if(/different request|different io context|I\/O objects created in/i.test(s))return "REQUEST_CONTEXT"
+  if(/too many (queries|subrequests)|D1.*(limit|quota)|rows_(read|written)|exceeded.*(limit|quota)/i.test(s))return "DB_LIMIT"
+  if(/CPU time|CPU limit|execution time/i.test(s))return "CPU_LIMIT"
+  if(/D1_ERROR|D1.*(busy|overload|timeout|unavailable)|SQLITE_BUSY|database is locked/i.test(s))return "DB_BUSY"
+  if(/no such (table|column)|SQLITE_ERROR/i.test(s))return "DB_SCHEMA"
+  if(/TimeoutError|timed out|timeout/i.test(s))return "TIMEOUT"
+  return "INTERNAL"
+}

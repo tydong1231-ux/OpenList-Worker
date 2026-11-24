@@ -1142,7 +1142,7 @@ export function setEnvCtx(env: any) {
  * 回取。拿不到时返回 null（非 Workers 运行时 / 单元测试），由调用方决定回退。
  */
 export function getEnvCtx(): any | null {
-  return globalEnvCtx || null
+  return currentRequestScope()?.env || globalEnvCtx || null
 }
 
 // 已知的旧默认值 → 当前默认值迁移表。
@@ -1312,6 +1312,11 @@ const ensureDefaultMetas = (db: any) => {
 const DB_CACHE_TTL_MS = 1000
 const dbCache = new WeakMap<object, { ts: number; db: any }>()
 const dbInflight = new WeakMap<object, Promise<any>>()
+// Injected by the Workers entrypoint. Other runtimes and unit tests keep their existing behavior.
+type DbRequestScope = { env: any; pending: WeakMap<object, Promise<any>> }
+let dbRequestScope: (()=>DbRequestScope|undefined) | undefined
+export function setDbRequestScopeProvider(provider: ()=>DbRequestScope|undefined) { dbRequestScope=provider }
+const currentRequestScope=()=>dbRequestScope?.()
 
 /**
  * 存储后端解析入口。默认直接委托给 store/backend 的 getStoreBackend；
@@ -1388,7 +1393,7 @@ export const __setStoreBackendLoaderForTest = (
  * `globalEnvCtx` 本身，saveDb 刷新缓存时用同一个键，天然对称。
  */
 const resolveNoArgKey = (): object | null => {
-  const ctx = globalEnvCtx
+  const ctx = currentRequestScope()?.env || globalEnvCtx
   return ctx && typeof ctx === "object" ? ctx : null
 }
 
@@ -1401,7 +1406,7 @@ const loadDb = async (envCtx?: any) => {
   // 注意：envCtx 可能为空（如 resolvePath 等内部调用 getDb() 不传 env）。
   // 此时必须回退到请求级 globalEnvCtx，否则 readDriver 读不到 DB_DRIVER、
   // getD1 读不到 DB binding，会错误回退到 json 后端读到旧的 KV 数据。
-  const activeEnv = envCtx || globalEnvCtx
+  const activeEnv = envCtx || currentRequestScope()?.env || globalEnvCtx
   // 解析器可被测试注入（__setStoreBackendLoaderForTest），故用 let + 可空：
   // 解析动作必须在 try 内 —— 配置类错误（驱动缺失、驱动 × 格式非法）要与
   // 读取错误走同一条降级路径，否则它会以「未捕获异常」的形式抛出，
@@ -1509,7 +1514,8 @@ export const getDb = async (envCtx?: any) => {
   if (!cacheKey) return loadDb(envCtx)
 
   // 1) Concurrent de-duplication: concurrent callers share a single KV read.
-  const pending = dbInflight.get(cacheKey)
+  const inflight = currentRequestScope()?.pending || dbInflight
+  const pending = inflight.get(cacheKey)
   if (pending) return pending
 
   // 2) Short-TTL memoization: sequential calls in one request reuse the result.
@@ -1522,9 +1528,9 @@ export const getDb = async (envCtx?: any) => {
       return db
     })
     .finally(() => {
-      dbInflight.delete(cacheKey)
+      inflight.delete(cacheKey)
     })
-  dbInflight.set(cacheKey, promise)
+  inflight.set(cacheKey, promise)
   return promise
 }
 
@@ -2252,7 +2258,7 @@ export const saveDb = async (
     globalEnvCtx = envCtx
   }
 
-  const activeEnv = envCtx || globalEnvCtx
+  const activeEnv = envCtx || currentRequestScope()?.env || globalEnvCtx
 
   // ============ 写前守卫：永远不得以「空数据」覆盖持久化配置 ============
   //

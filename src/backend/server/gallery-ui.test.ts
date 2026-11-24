@@ -70,9 +70,9 @@ test("memory cards navigate to a thumbnail-only virtual folder",()=>{
 
 test("preview fits whole photos and videos in a bounded viewport",()=>{
  assert.match(galleryCss,/grid-template-columns:minmax\(0,1fr\);grid-template-rows:minmax\(0,1fr\)/)
- assert.match(galleryCss,/\.preview \.stage>img:not\(\.zoomed\),\.preview \.stage>video:not\(\.live-video\)\{[^}]*object-fit:contain/)
- assert.match(galleryCss,/\.preview \.stage\.zoom-active\{overflow:auto/)
- assert.match(galleryJs,/stage\.classList\.toggle\("zoom-active",zoomed\)/)
+ assert.match(galleryCss,/\.preview \.stage>img,\.preview \.stage>video:not\(\.live-video\)\{[^}]*object-fit:contain/)
+ assert.match(galleryCss,/\.preview \.stage\.photo-gesture\{overflow:hidden;touch-action:none/)
+ assert.match(galleryJs,/photoStage\.classList\.toggle\("zoom-active",z.scale>1.01\)/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
 
@@ -119,5 +119,25 @@ test("gallery decodes unsupported HEIC and TIFF only on explicit preview",()=>{
  assert.match(galleryJs,/URL.revokeObjectURL/)
  assert.match(galleryJs,/function setVideoSource/)
  assert.match(galleryJs,/RAW 原件请下载查看/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})
+
+
+test("focal point zoom math and bounded panning",()=>{
+ const a=galleryJs.indexOf("function photoClamp("),b=galleryJs.indexOf("const photoStage=",a)
+ const math=new Function(galleryJs.slice(a,b)+";return {photoAnchor,photoPose,photoBounds}")()
+ const start={s:1,x:0,y:0,cx:80,cy:-40}
+ assert.deepEqual(math.photoAnchor(start,2,80,-40),{x:-80,y:40})
+ assert.deepEqual(math.photoAnchor(start,2,100,-30),{x:-60,y:50})
+ const g={w:400,h:800,fw:400,fh:300}
+ assert.deepEqual(math.photoBounds(g,2),{x:200,y:0})
+ assert.deepEqual(math.photoPose(g,2,400,120),{s:2,x:200,y:0})
+ assert.match(galleryJs,/setPointerCapture/)
+ assert.match(galleryJs,/pointercancel/)
+ assert.match(galleryJs,/requestAnimationFrame\(renderPhotoZoom\)/)
+ assert.doesNotMatch(galleryJs,/img\.ondblclick=/)
+ assert.doesNotMatch(galleryJs,/liveSwipeBlockUntil/)
+ assert.match(galleryJs,/stats_rev/)
+ assert.match(galleryJs,/DB_LIMIT/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })

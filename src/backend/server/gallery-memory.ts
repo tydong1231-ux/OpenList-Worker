@@ -246,7 +246,8 @@ export async function runGalleryCron(env:any,scheduledTime:number) {
   const g=await contextForOwner(env,owner)
   if(!g)return
   if(m!==0&&m!==30){const s=await ensure(g);if(s.done||Number(s.epoch)!==1||publicState(s).limited)return}
-  await scanStep(g)
+  const result=await scanStep(g)
+  if(result.worked)console.log("[GalleryCron] indexed page",{pages:result.pages,found:result.found||0,done:result.done})
 }
 async function serialize(c:any,g:GalleryCtx,items:IndexedMedia[]) {
   const key=await deriveConfigEncryptionKey("private-gallery-v1:"+g.secret)

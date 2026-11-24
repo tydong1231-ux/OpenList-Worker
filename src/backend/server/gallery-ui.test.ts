@@ -75,3 +75,12 @@ test("preview fits whole photos and videos in a bounded viewport",()=>{
  assert.match(galleryJs,/stage\.classList\.toggle\("zoom-active",zoomed\)/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
+
+
+test("gallery install assets use dedicated same-origin manifest and network-only service worker",()=>{
+ assert.match(galleryHtml,/rel="manifest" href="\/@gallery.webmanifest"/)
+ assert.match(galleryHtml,/apple-mobile-web-app-capable/)
+ assert.match(galleryJs,/beforeinstallprompt/)
+ assert.match(galleryJs,/serviceWorker.register/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

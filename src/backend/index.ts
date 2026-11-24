@@ -1,5 +1,6 @@
 import { Hono } from "hono"
 import { galleryHtml, galleryCss, galleryJs } from "./server/gallery-ui"
+import { galleryManifest, galleryServiceWorker, galleryIcon } from "./server/gallery-pwa"
 import { quarkTvSetupPage, quarkTvSetupScript } from "./server/quark-tv-setup-page"
 import { setupRouter } from "./server/router"
 import { rawRouter } from "./server/raw"
@@ -177,17 +178,22 @@ const serveGallery = (c: any) => {
   c.header("Referrer-Policy", "no-referrer")
   c.header("X-Frame-Options", "DENY")
   c.header("X-Content-Type-Options", "nosniff")
-  c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+  c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
   return c.html(galleryHtml)
 }
 app.get("/", serveGallery)
 app.get("/@gallery", serveGallery)
 app.get("/@gallery.css", (c) => c.body(galleryCss, 200, {
-  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-fit6" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-pwa7" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 app.get("/@gallery.js", (c) => c.body(galleryJs, 200, {
-  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-fit6" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-pwa7" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
+
+// Dedicated PWA assets; official OpenList manifest and frontend are untouched.
+app.get("/@gallery.webmanifest", c=>c.body(galleryManifest,200,{"Content-Type":"application/manifest+json; charset=utf-8","Cache-Control":"no-cache","X-Content-Type-Options":"nosniff"}))
+app.get("/@gallery-sw.js", c=>c.body(galleryServiceWorker,200,{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-cache","Service-Worker-Allowed":"/","X-Content-Type-Options":"nosniff"}))
+for (const size of ["180","192","512"]) app.get("/@gallery-icon-"+size+".png",c=>c.body(galleryIcon(size)!,200,{"Content-Type":"image/png","Cache-Control":"public, max-age=604800","X-Content-Type-Options":"nosniff"}))
 
 // Same-origin QR setup helper, separate from the official SPA.
 app.get("/@quark-tv", (c) => {

@@ -183,10 +183,10 @@ const serveGallery = (c: any) => {
 app.get("/", serveGallery)
 app.get("/@gallery", serveGallery)
 app.get("/@gallery.css", (c) => c.body(galleryCss, 200, {
-  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-compact1" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-placement1" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 app.get("/@gallery.js", (c) => c.body(galleryJs, 200, {
-  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-compact1" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-placement1" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 
 // Same-origin QR setup helper, separate from the official SPA.

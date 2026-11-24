@@ -144,7 +144,7 @@ function setDriverCache(key: string, driver: StorageDriver): void {
 export interface StorageRequestContext {
   waitUntil?: (promise: Promise<unknown>) => void
   env?: any // ESA/Cloudflare env，用于请求级缓存复用
-  gallery?: { key: CryptoKey; owner: string; hint?: string; refresh: boolean; usedHint: boolean }
+  gallery?: { key: CryptoKey; owner: string; hint?: string; refresh: boolean; usedHint: boolean; timing: { calls: number; upstream_ms: number; resolve_ms: number; init_ms: number; merge_ms: number } }
 }
 
 export interface GetDriverOptions {
@@ -1481,7 +1481,9 @@ export async function listItems(
   virtualPath: string,
   requestContext?: StorageRequestContext,
 ): Promise<{ content: FileItem[]; provider: string; storage?: any }> {
+  const started = Date.now()
   const resolved = await resolvePath(virtualPath, requestContext?.env)
+  if (requestContext?.gallery) requestContext.gallery.timing.resolve_ms = Date.now() - started
   return listItemsResolved(resolved, virtualPath, requestContext)
 }
 
@@ -1496,7 +1498,9 @@ async function listItemsResolved(
   if (resolved.storage) {
     driverName = resolved.storage.driver
     try {
+      const initStarted = Date.now()
       const driver = await getDriver(driverName, resolved.storage)
+      if (requestContext?.gallery) requestContext.gallery.timing.init_ms = Date.now() - initStarted
       // Get raw items from driver
       try {
         const gallery = requestContext?.gallery
@@ -1504,9 +1508,9 @@ async function listItemsResolved(
           const fid = !gallery.refresh ? await verifyGalleryHint(gallery.key, resolved.storage, resolved.cleanPath, gallery.owner, gallery.hint) : undefined
           if (fid) {
             gallery.usedHint = true
-            items = await driver.listByDirectoryId(resolved.physical!, fid)
-          } else if (gallery.refresh) items = await driver.listFresh(virtualPath, resolved.physical!)
-          else items = await driver.list(virtualPath, resolved.physical!)
+            items = await driver.listByDirectoryId(resolved.physical!, fid, gallery.timing)
+          } else if (gallery.refresh) items = await driver.listFresh(virtualPath, resolved.physical!, gallery.timing)
+          else items = await driver.list(virtualPath, resolved.physical!, gallery.timing)
         } else items = await driver.list(virtualPath, resolved.physical!)
       } finally {
         await flushPendingDriverState(
@@ -1547,6 +1551,7 @@ async function listItemsResolved(
   }
 
   // Merge virtual child storage mounts if we are listing a directory that contains mount points
+  const mergeStarted = Date.now()
   const db = await getDb(requestContext?.env)
   const activeStorages = (db.storages || []).filter((s: any) => !s.disabled)
   const cleanListedPath = resolved.cleanPath
@@ -1591,6 +1596,7 @@ async function listItemsResolved(
     }
   })
 
+  if (requestContext?.gallery) requestContext.gallery.timing.merge_ms = Date.now() - mergeStarted
   return { content: items, provider: driverName, storage: resolved.storage }
 }
 

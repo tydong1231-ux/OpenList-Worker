@@ -316,7 +316,7 @@ fsRouter.post("/list", async (c) => {
   const reqPath = getActualPath(user, body.path || "/")
   // Only authenticated administrators receive short-lived directory locators. Ordinary ACLs below still apply.
   const gallery = body.gallery === true && isAdmin(user) && user?.id != null && !isShare && requestContext
-    ? { key: await galleryHintKey(await getJwtSecret(c)), owner: String(user.id), hint: typeof body.gallery_hint === "string" ? body.gallery_hint : undefined, refresh: body.refresh === true, usedHint: false }
+    ? { key: await galleryHintKey(await getJwtSecret(c)), owner: String(user.id), hint: typeof body.gallery_hint === "string" ? body.gallery_hint : undefined, refresh: body.refresh === true, usedHint: false, timing: { calls: 0, upstream_ms: 0, resolve_ms: 0, init_ms: 0, merge_ms: 0 } }
     : undefined
   if (gallery && requestContext) (requestContext as import("../internal/op/storage").StorageRequestContext).gallery = gallery
   const page = parseInt(body.page, 10) || 1
@@ -589,7 +589,7 @@ fsRouter.post("/list", async (c) => {
         direct_upload_tools: directUploadTools,
         page_size: effectivePerPage > 0 ? effectivePerPage : undefined,
         cache_expiration: 0,
-        ...(body.gallery === true ? { gallery_timing: { server_ms: Date.now() - requestStarted, list_ms: listMs, hint_used: !!gallery?.usedHint, colo: String((c.req.raw as any).cf?.colo || "") } } : {}),
+        ...(body.gallery === true ? { gallery_timing: { server_ms: Date.now() - requestStarted, list_ms: listMs, hint_used: !!gallery?.usedHint, colo: String((c.req.raw as any).cf?.colo || ""), placement: String(c.req.header("cf-placement") || ""), ...(gallery ? { quark_calls: gallery.timing.calls, quark_ms: gallery.timing.upstream_ms, resolve_ms: gallery.timing.resolve_ms, init_ms: gallery.timing.init_ms, merge_ms: gallery.timing.merge_ms } : {}) } } : {}),
       },
     })
   } catch (err: any) {

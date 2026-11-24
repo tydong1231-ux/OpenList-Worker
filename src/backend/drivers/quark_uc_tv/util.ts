@@ -78,6 +78,8 @@ function objectData(v: any): Record<string, any> {
   return v && typeof v === "object" && !Array.isArray(v) ? v : {}
 }
 
+export interface QuarkListTiming { calls: number; upstream_ms: number }
+
 export class ClientQuarkUcTv {
   private conf: Conf
   private addition: DriverQuarkUcTvAddition
@@ -310,13 +312,15 @@ export class ClientQuarkUcTv {
     this.accessToken = next.access_token
   }
 
-  async getFiles(parentFid: string): Promise<QuarkTvFile[]> {
+  async getFiles(parentFid: string, timing?: QuarkListTiming): Promise<QuarkTvFile[]> {
     const all: QuarkTvFile[] = []
     let pageIndex = 0
     const pageSize = 100
     const desc = this.addition.order_direction === "asc" ? "0" : "1"
     const orderBy = this.addition.order_by === "file_name" ? "1" : "3"
     while (true) {
+      const started = Date.now()
+      if (timing) timing.calls++
       const resp = await this.request<QuarkTvCommonResp>("/file", "GET", {
         method: "list",
         parent_fid: parentFid,
@@ -328,7 +332,7 @@ export class ClientQuarkUcTv {
         list_all: "0",
         page_size: String(pageSize),
         page_index: String(pageIndex),
-      })
+      }).finally(() => { if (timing) timing.upstream_ms += Date.now() - started })
       const data = resp.data as QuarkTvFilesData | undefined
       const files = data?.files || []
       all.push(...files)

@@ -4,7 +4,7 @@ import {
   calcFileType,
 } from "../../internal/driver/base"
 import { DriverQuarkUcTvAddition, QuarkTvFile } from "./types"
-import { ClientQuarkUcTv } from "./util"
+import { ClientQuarkUcTv, type QuarkListTiming } from "./util"
 
 const DEFAULT_ROOT = "0"
 
@@ -41,23 +41,23 @@ export class DriverQuarkUcTv implements StorageDriver {
     }
   }
 
-  async list(_virtualPath: string, physicalPath: string): Promise<FileItem[]> {
-    const fid = await this.resolveDirId(physicalPath)
-    return this.listByDirectoryId(physicalPath, fid)
+  async list(_virtualPath: string, physicalPath: string, timing?: QuarkListTiming): Promise<FileItem[]> {
+    const fid = await this.resolveDirId(physicalPath, timing)
+    return this.listByDirectoryId(physicalPath, fid, timing)
   }
 
   /** Called only with a server-verified, mount-scoped directory locator. */
-  async listByDirectoryId(physicalPath: string, fid: string): Promise<FileItem[]> {
-    const files = await this.client.getFiles(fid)
+  async listByDirectoryId(physicalPath: string, fid: string, timing?: QuarkListTiming): Promise<FileItem[]> {
+    const files = await this.client.getFiles(fid, timing)
     const clean = this.cleanPath(physicalPath)
     this.rememberPath(clean, fid)
     for (const f of files) if (f.isdir === 1 && f.fid && f.filename) this.rememberPath(clean ? clean + "/" + f.filename : f.filename, f.fid)
     return files.map((f) => this.fileToItem(f))
   }
 
-  async listFresh(virtualPath: string, physicalPath: string): Promise<FileItem[]> {
+  async listFresh(virtualPath: string, physicalPath: string, timing?: QuarkListTiming): Promise<FileItem[]> {
     this.pathCache.clear()
-    return this.list(virtualPath, physicalPath)
+    return this.list(virtualPath, physicalPath, timing)
   }
 
   async get(_virtualPath: string, physicalPath: string): Promise<FileItem> {
@@ -148,7 +148,7 @@ export class DriverQuarkUcTv implements StorageDriver {
     while (this.pathCache.size > 4096) this.pathCache.delete(this.pathCache.keys().next().value!)
   }
 
-  private async resolveDirId(physicalPath: string): Promise<string> {
+  private async resolveDirId(physicalPath: string, timing?: QuarkListTiming): Promise<string> {
     const clean = this.cleanPath(physicalPath)
     if (!clean) return DEFAULT_ROOT
     const hit = this.cachedPath(clean)
@@ -162,7 +162,7 @@ export class DriverQuarkUcTv implements StorageDriver {
       if (prefix) { currentId = prefix; start = i; break }
     }
     for (let i = start; i < parts.length; i++) {
-      const files = await this.client.getFiles(currentId)
+      const files = await this.client.getFiles(currentId, timing)
       const prefix = parts.slice(0, i).join("/")
       for (const f of files) if (f.isdir === 1 && f.fid && f.filename) this.rememberPath(prefix ? prefix + "/" + f.filename : f.filename, f.fid)
       const target = files.find((f) => f.isdir === 1 && f.filename === parts[i])

@@ -312,6 +312,22 @@ export class ClientQuarkUcTv {
     this.accessToken = next.access_token
   }
 
+  // One bounded page for the resumable private media index. No binary downloads.
+  async getIndexPage(parentFid: string, pageIndex: number): Promise<{ files: QuarkTvFile[]; done: boolean }> {
+    const pageSize = 100
+    if (!Number.isSafeInteger(pageIndex) || pageIndex < 0 || pageIndex > 10000) throw new Error("Invalid page")
+    const resp = await this.request<QuarkTvCommonResp>("/file", "GET", {
+      method: "list", parent_fid: parentFid, order_by: "1",
+      desc: "0", category: "", source: "", ex_source: "", list_all: "0",
+      page_size: String(pageSize), page_index: String(pageIndex),
+    })
+    const data = resp.data as QuarkTvFilesData | undefined
+    if (!Array.isArray(data?.files) || data.files.length > pageSize) throw new Error("Invalid listing")
+    const total = Number(data.total_count)
+    const hasTotal = data.total_count != null && Number.isSafeInteger(total) && total >= 0
+    return { files: data.files, done: data.files.length === 0 || (hasTotal ? pageIndex * pageSize + data.files.length >= total : data.files.length < pageSize) }
+  }
+
   async getFiles(parentFid: string, timing?: QuarkListTiming): Promise<QuarkTvFile[]> {
     const all: QuarkTvFile[] = []
     let pageIndex = 0

@@ -27,3 +27,13 @@ test("compact header has one shared toolbar and no duplicate hero", () => {
   assert.match(galleryCss, /min-height:44px/)
   assert.doesNotThrow(() => new Script(galleryJs))
 })
+
+
+test("memory and timeline keep original gallery navigation and metadata-only APIs", () => {
+  assert.match(galleryHtml, /id="memorySection"/)
+  assert.match(galleryHtml, /id="timelineSection"/)
+  assert.match(galleryJs, /\/admin\/gallery-memory\/step/)
+  assert.match(galleryJs, /\/admin\/gallery-memory\/feed/)
+  assert.match(galleryJs, /selected.full_path/)
+  assert.doesNotThrow(() => new Script(galleryJs))
+})

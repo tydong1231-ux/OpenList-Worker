@@ -185,6 +185,9 @@ importers:
       typescript-natural-sort:
         specifier: ^0.7.2
         version: 0.7.2
+      utif:
+        specifier: 3.1.0
+        version: 3.1.0
       xpath:
         specifier: ^0.0.34
         version: 0.0.34
@@ -4300,6 +4303,9 @@ packages:
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
+
+  utif@3.1.0:
+    resolution: {integrity: sha512-WEo4D/xOvFW53K5f5QTaTbbiORcm2/pCL9P6qmJnup+17eYfKaEhDeX9PeQkuyEoIxlbGklDuGl8xwuXYMrrXQ==}
 
 snapshots:
 
@@ -8671,3 +8677,7 @@ snapshots:
   zod@3.25.76: {}
 
   zwitch@2.0.4: {}
+
+  utif@3.1.0:
+    dependencies:
+      pako: 1.0.11

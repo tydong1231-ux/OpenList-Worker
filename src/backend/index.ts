@@ -178,16 +178,16 @@ const serveGallery = (c: any) => {
   c.header("Referrer-Policy", "no-referrer")
   c.header("X-Frame-Options", "DENY")
   c.header("X-Content-Type-Options", "nosniff")
-  c.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+  c.header("Content-Security-Policy", "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https:; connect-src 'self' https:; manifest-src 'self'; worker-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
   return c.html(galleryHtml)
 }
 app.get("/", serveGallery)
 app.get("/@gallery", serveGallery)
 app.get("/@gallery.css", (c) => c.body(galleryCss, 200, {
-  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-glass9" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "text/css; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-codecs10" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 app.get("/@gallery.js", (c) => c.body(galleryJs, 200, {
-  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-glass9" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
+  "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": c.req.query("v") === "20261124-codecs10" ? "private, max-age=31536000, immutable" : "no-cache", "X-Content-Type-Options": "nosniff",
 }))
 
 // Dedicated PWA assets; official OpenList manifest and frontend are untouched.

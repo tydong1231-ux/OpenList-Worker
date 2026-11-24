@@ -359,8 +359,8 @@ export class ClientQuarkUcTv {
     return all
   }
 
-  async getDownloadUrl(fid: string, isVideo = false): Promise<string> {
-    if (this.addition.link_method === "streaming" && isVideo) {
+  async getDownloadUrl(fid: string, isVideo = false, preferStream = false): Promise<string> {
+    if ((preferStream || this.addition.link_method === "streaming") && isVideo) {
       const resp = await this.request<QuarkTvCommonResp>("/file", "GET", {
         method: "streaming",
         group_by: "source",
@@ -369,7 +369,8 @@ export class ClientQuarkUcTv {
         support: "dolby_vision",
       })
       const data = resp.data as QuarkTvStreamingData | undefined
-      const url = data?.video_info?.find((v) => v.url)?.url || ""
+      const variants = data?.video_info || []
+      const url = (preferStream ? variants.find(v => v.url && ["normal","high"].includes(String(v.resolution)))?.url : undefined) || variants.find(v => v.url)?.url || ""
       if (!url) throw new Error("[QuarkTV] no streaming link found")
       return url
     }

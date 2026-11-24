@@ -50,7 +50,7 @@ export class DriverQuarkUcTv implements StorageDriver {
   async getIndexPage(fid: string, page: number, recent = false) { return this.client.getIndexPage(fid, page, recent) }
 
   /** Only called by the authenticated gallery after a scoped database lookup. */
-  async getIndexedMediaUrl(fid: string, isVideo: boolean) { return this.client.getDownloadUrl(fid,isVideo) }
+  async getIndexedMediaUrl(fid: string, isVideo: boolean, preferStream=false) { return this.client.getDownloadUrl(fid,isVideo,preferStream) }
 
   /** Called only with a server-verified, mount-scoped directory locator. */
   async listByDirectoryId(physicalPath: string, fid: string, timing?: QuarkListTiming): Promise<FileItem[]> {

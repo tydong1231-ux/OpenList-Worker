@@ -307,6 +307,32 @@ galleryMemoryRouter.post("/memory-items",async(c)=>{
     return ok(c,{items:await serialize(c,g,ids.map(id=>byId.get(id)).filter(Boolean),visibleEpoch(s))})
   }catch{return fail(c,"暂时无法读取回忆，请稍后重试。",503)}
 })
+// Limited, authenticated byte transport ONLY for compatible image decoding
+// when the original CDN disallows browser CORS. Never buffer or store originals
+// on the Worker. The URL is produced by the validated Quark driver, not input.
+const MAX_COMPAT_BYTES=32*1024*1024
+async function compatImageBytes(c:any,initial:string){
+  let url=initial
+  const signal=AbortSignal.timeout(45000)
+  for(let hop=0;hop<4;hop++){
+    const secure=safeThumb(url)
+    if(!secure)throw Error("IMAGE_URL")
+    assertSafeUrl(secure,"Gallery image byte transport")
+    const res=await fetch(secure,{method:"GET",redirect:"manual",cache:"no-store",signal,headers:{Accept:"image/*,application/octet-stream"}})
+    if(res.status>=300&&res.status<400){
+      const next=res.headers.get("location");await res.body?.cancel().catch(()=>{})
+      if(!next)throw Error("IMAGE_REDIRECT")
+      url=new URL(next,secure).href;continue
+    }
+    if(!res.ok||res.status!==200||!res.body){await res.body?.cancel().catch(()=>{});return fail(c,"夸克未返回完整图片，请重试。",502)}
+    const length=Number(res.headers.get("content-length")||0)
+    if(length>MAX_COMPAT_BYTES||/^text\/html/i.test(res.headers.get("content-type")||"")){await res.body.cancel().catch(()=>{});return fail(c,"图片过大或链接返回非图片内容。",400)}
+    let sent=0
+    const bounded=res.body.pipeThrough(new TransformStream<Uint8Array,Uint8Array>({transform(chunk,controller){sent+=chunk.byteLength;if(sent>MAX_COMPAT_BYTES)controller.error(Error("IMAGE_SIZE_LIMIT"));else controller.enqueue(chunk)}}))
+    return c.body(bounded,200,{"Content-Type":"application/octet-stream","Cache-Control":"no-store, private","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"})
+  }
+  return fail(c,"夸克图片链接重定向过多。",502)
+}
 // Private, authenticated link resolution by indexed FID. No recursive listing,
 // no public token endpoint, no media proxy, and no bypass of protected subtrees.
 galleryMemoryRouter.post("/media-link",async(c)=>{
@@ -317,14 +343,18 @@ galleryMemoryRouter.post("/media-link",async(c)=>{
     if(!safeFid(body.fid)||typeof body.path!=="string")return fail(c,"无效的媒体标识。")
     if(g.hasProtectedSubtree||!!Number(g.storage.web_proxy)||String(g.storage.webdav_policy||"302_redirect")!=="302_redirect")return fail(c,"此挂载使用原有路径验证。",409)
     const s=await getState(g);if(!s)return fail(c,"媒体索引尚未建立。",404)
-    const f=await first(g.db,"SELECT fid,full_path,kind,size,duration_seconds FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,visibleEpoch(s))
+    const f=await first(g.db,"SELECT fid,full_path,name,kind,size,duration_seconds FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,visibleEpoch(s))
     if(!f||!g.allowed(f.full_path)||f.full_path!==body.path)return fail(c,"媒体已移动、删除或需要重新同步。",404)
+    const bytesMode=body.mode==="image-bytes",streamMode=body.mode==="stream"
+    if(bytesMode&&(f.kind!=="image"||!/\.(heic|heif|hif|tiff?)$/i.test(f.name)||Number(f.size)<=0||Number(f.size)>MAX_COMPAT_BYTES))return fail(c,"图片超过本地兼容预览限制或格式不支持。",400)
+    if(streamMode&&f.kind!=="video")return fail(c,"仅视频可请求流媒体。",400)
     stage="QUARK_LINK"
     const driver=await getDriver(g.storage.driver,g.storage)
     if(!(driver instanceof DriverQuarkUcTv))return fail(c,"存储配置已变化。",409)
-    const url=await driver.getIndexedMediaUrl(f.fid,f.kind==="video"&&Number(f.size)>0)
+    const url=await driver.getIndexedMediaUrl(f.fid,f.kind==="video"&&Number(f.size)>0,streamMode)
     const secure=safeThumb(url);if(!secure)return fail(c,"夸克未返回可用的 HTTPS 媒体链接。",502)
     assertSafeUrl(secure,"Gallery media link",getTrustedHosts(g.storage.addition,c.env))
+    if(bytesMode){stage="IMAGE_BYTES";return await compatImageBytes(c,secure)}
     return ok(c,{url:secure,duration:Number(f.duration_seconds||0)})
   }catch(e:any){
     const raw=String(e?.diagnostic||"")

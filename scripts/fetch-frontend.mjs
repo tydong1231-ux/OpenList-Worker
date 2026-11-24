@@ -40,6 +40,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { buildGalleryCodecs } from "./build-gallery-codecs.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // 始终以仓库根目录为基准（无论从哪个 cwd 调用）
@@ -416,6 +417,7 @@ async function main() {
 
 try {
   await main()
+  await buildGalleryCodecs(ROOT, DEST)
 } catch (err) {
   console.error("[fetch-frontend] Failed:", err?.message || err)
   process.exit(1)

@@ -109,3 +109,15 @@ test("album chrome docks filters and media preview uses progressive direct links
  assert.match(galleryJs,/function formatDuration/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
+
+
+test("gallery decodes unsupported HEIC and TIFF only on explicit preview",()=>{
+ assert.match(galleryJs,/function imageCompatFormat/)
+ assert.match(galleryJs,/new Worker\("\/gallery-codecs\/image-worker-v1.js"\)/)
+ assert.match(galleryJs,/mode:"image-bytes"/)
+ assert.match(galleryJs,/credentials:"omit"/)
+ assert.match(galleryJs,/URL.revokeObjectURL/)
+ assert.match(galleryJs,/function setVideoSource/)
+ assert.match(galleryJs,/RAW 原件请下载查看/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

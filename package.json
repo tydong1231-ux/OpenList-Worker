@@ -165,6 +165,7 @@
     "ssh2": "^1.17.0",
     "streamsaver": "^2.0.6",
     "typescript-natural-sort": "^0.7.2",
+    "utif": "3.1.0",
     "xpath": "^0.0.34",
     "zod": "^3.23.8"
   },

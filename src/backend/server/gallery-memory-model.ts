@@ -3,7 +3,7 @@ export const GALLERY_ROOT = "/夸克网盘"
 export const safeName = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 512 && !v.startsWith(".") && !/[\x00-\x1f\x7f\\/%]/.test(v)
 export const safeFid = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(v)
 export function mediaKind(name: string) {
-  if (/\.(jpe?g|png|gif|webp|avif|bmp|heic|heif|tiff?|ico)$/i.test(name)) return "image"
+  if (/\.(jpe?g|jpe|jfif|png|apng|gif|webp|avif|jxl|bmp|heic|heif|hif|tiff?|ico|svg|dng|cr2|cr3|nef|arw|raf|orf|rw2)$/i.test(name)) return "image"
   if (/\.(mp4|m4v|mov|webm|mkv|avi|flv|wmv|ts|m2ts|mpeg|mpg|3gp|ogv|mts|rmvb)$/i.test(name)) return "video"
   return ""
 }

@@ -66,3 +66,12 @@ test("memory cards navigate to a thumbnail-only virtual folder",()=>{
  assert.match(galleryJs,/memoryImg\(f,"",false\)/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
+
+
+test("preview fits whole photos and videos in a bounded viewport",()=>{
+ assert.match(galleryCss,/grid-template-columns:minmax\(0,1fr\);grid-template-rows:minmax\(0,1fr\)/)
+ assert.match(galleryCss,/\.preview \.stage>img:not\(\.zoomed\),\.preview \.stage>video:not\(\.live-video\)\{[^}]*object-fit:contain/)
+ assert.match(galleryCss,/\.preview \.stage\.zoom-active\{overflow:auto/)
+ assert.match(galleryJs,/stage\.classList\.toggle\("zoom-active",zoomed\)/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

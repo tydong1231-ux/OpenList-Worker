@@ -52,7 +52,17 @@ test("album defaults to indexed feed and renders a virtual continuous timeline",
 
 
 test("browser does not automatically invoke scan steps",()=>{
- assert.doesNotMatch(galleryJs,/setTimeout\(memoryStep/)
+ assert.match(galleryJs,/memTurbo&&memActive/)
  assert.match(galleryJs,/memorySync"\)\.onclick/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})
+
+
+test("memory cards navigate to a thumbnail-only virtual folder",()=>{
+ assert.match(galleryHtml,/id="memoryFolder"/)
+ assert.match(galleryJs,/openMemoryFolder\(card\)/)
+ assert.match(galleryJs,/\/admin\/gallery-memory\/memory-items/)
+ assert.match(galleryJs,/card\.ids\.slice\(0,32\)/)
+ assert.match(galleryJs,/memoryImg\(f,"",false\)/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })

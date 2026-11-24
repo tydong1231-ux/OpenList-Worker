@@ -21,3 +21,16 @@ test("memory groups deduplicate and prefer existing tags, dates and thumbnails",
   const fids=cards.flatMap(c=>c.items.map(x=>x.fid));assert.equal(new Set(fids).size,fids.length)
   assert.deepEqual(cards,buildMemoryGroups(rows.slice(0,10),rows,[],"day"))
 })
+
+
+import { liveStillStem, chooseLivePair } from "./gallery-memory-model"
+test("Live Photo pairing is local, same-day, unambiguous and keeps the original video",()=>{
+  const photo={name:"IMG_0123.HEIC",folder:"/drive/a",kind:"image",day:"2024-01-01"}
+  const video={fid:"v",name:"img_0123.MOV",folder:photo.folder,full_path:photo.folder+"/img_0123.MOV",kind:"video",day:photo.day,size:4000000,date_source:"cloud",tag:"",thumb_enc:"",shuffle:1}
+  assert.equal(liveStillStem(photo.name),"IMG_0123")
+  assert.equal(chooseLivePair(photo,[video])?.fid,"v")
+  assert.equal(chooseLivePair(photo,[{...video,folder:"/other"}]),undefined)
+  assert.equal(chooseLivePair(photo,[{...video,day:"2024-01-02"}]),undefined)
+  assert.equal(chooseLivePair(photo,[video,{...video,fid:"v2"}]),undefined)
+  assert.equal(chooseLivePair(photo,[{...video,size:101*1024*1024}]),undefined)
+})

@@ -69,7 +69,7 @@ export function buildMemoryGroups(recent: IndexedMedia[], sample: IndexedMedia[]
   const used = new Set<string>(), groups: MemoryGroup[] = []
   const ordered = (rows: IndexedMedia[]) => distinct(rows).sort((a,b)=>Number(!!b.thumb_enc)-Number(!!a.thumb_enc) || stableHash(seed+a.fid)-stableHash(seed+b.fid))
   const add = (id:string,title:string,subtitle:string,rows:IndexedMedia[],min=2) => {
-    const fresh = ordered(rows).filter(x=>!used.has(x.fid)).slice(0,8)
+    const fresh = ordered(rows).filter(x=>!used.has(x.fid)).slice(0,32)
     if (fresh.length < min) return
     for (const x of fresh) used.add(x.fid)
     groups.push({id,title,subtitle,items:fresh})
@@ -90,4 +90,18 @@ export function buildMemoryGroups(recent: IndexedMedia[], sample: IndexedMedia[]
   add("random","随机发现","跨相册 · 今日精选",sample,1)
   add("recent","最近的片段","按已有媒体日期排序",recent,1)
   return groups.slice(0,5)
+}
+
+
+// Conservative Live Photo candidate matching. A file-name match is not
+// proof of Apple's embedded assetIdentifier; never hide/delete the MOV.
+export function liveStillStem(name: string) {
+  const m=String(name||"").match(/^(.+)\.(heic|heif|jpe?g)$/i)
+  return m?.[1]||""
+}
+export function chooseLivePair(still: Pick<IndexedMedia,"name"|"folder"|"day"|"kind">, candidates: IndexedMedia[]) {
+  const stem=liveStillStem(still.name)
+  if(still.kind!=="image"||!stem||!still.day||still.day==="0000-00-00")return undefined
+  const matches=candidates.filter(v=>v.kind==="video"&&v.folder===still.folder&&v.day===still.day&&v.name.toLowerCase()===(stem+".mov").toLowerCase()&&Number(v.size)>0&&Number(v.size)<=100*1024*1024)
+  return matches.length===1?matches[0]:undefined
 }

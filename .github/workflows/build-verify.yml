@@ -68,6 +68,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Gallery SQL and cron regression (local SQLite, no production D1)
+        run: pnpm exec tsx --test src/backend/server/gallery-cron.test.ts
+
       - name: Fetch official frontend dist
         run: node scripts/fetch-frontend.mjs
 

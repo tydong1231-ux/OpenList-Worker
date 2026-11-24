@@ -11,10 +11,14 @@ import { GALLERY_ROOT, safeName, safeFid, mediaKind, mediaDate, mediaTags, safeT
 export const galleryMemoryRouter = new Hono()
 // Only one Quark page per step. No timers/cron or image/video downloads on the server.
 // D1 writes include SQL index maintenance. Reserve a worst-case page, then reconcile with actual D1 metadata.
-const DAILY_WRITE_BUDGET = 90000, PAGE_WRITE_RESERVE = 1600, MAX_PAGES = 10000, PAGE_SIZE = 48, LEASE_MS = 90000, AUTO_REFRESH_MS = 7 * 24 * 60 * 60 * 1000
-export const GALLERY_CRON = "* 1-16 * * *"
+const DAILY_WRITE_BUDGET = 40000, PAGE_WRITE_RESERVE = 1600, PAGE_SIZE = 48, LEASE_MS = 180000, AUTO_REFRESH_MS = 7 * 24 * 60 * 60 * 1000
+export const GALLERY_CRON = "*/5 1-16 * * *"
 const HOUR=3600000, THUMB_REFRESH_MS=7*24*HOUR
 const S="private_gallery_state", Q="private_gallery_queue", I="private_gallery_items", B="private_gallery_budget"
+const A="private_gallery_stats", R="private_gallery_read_budget"
+const STATS_INTERVAL=2*HOUR, HEAVY_READ_BUDGET=500000
+const statsSchema="CREATE TABLE IF NOT EXISTS "+A+" (scope TEXT PRIMARY KEY, signature TEXT NOT NULL, updated_at INTEGER NOT NULL, payload TEXT NOT NULL)"
+const readBudgetSchema="CREATE TABLE IF NOT EXISTS "+R+" (day TEXT PRIMARY KEY, units INTEGER NOT NULL)"
 const schema = [
   "CREATE TABLE IF NOT EXISTS "+S+" (scope TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 1, pages INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, day TEXT NOT NULL DEFAULT '', day_pages INTEGER NOT NULL DEFAULT 0, lease TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', completed_at INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0)",
   "CREATE TABLE IF NOT EXISTS "+Q+" (scope TEXT NOT NULL, epoch INTEGER NOT NULL, fid TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL, page INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, next_check INTEGER NOT NULL DEFAULT 0, recent_page INTEGER NOT NULL DEFAULT 0, checked_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope,epoch,fid))",
@@ -36,6 +40,25 @@ const utcDay=()=>new Date().toISOString().slice(0,10)
 const query=(db:any,sql:string,...params:any[])=>db.prepare(sql).bind(...params)
 const rows=async(db:any,sql:string,...params:any[])=>((await query(db,sql,...params).all()).results||[]) as any[]
 const first=async(db:any,sql:string,...params:any[])=>await query(db,sql,...params).first() as any
+const missingTable=(e:unknown)=>/no such table/i.test(String((e as any)?.message||e))
+function valuesSql(n:number,width:number){return Array.from({length:n},()=>"("+Array(width).fill("?").join(",")+")").join(",")}
+// CROSS JOIN fixes the small input as the outer loop; +epoch is a residual
+// filter, preventing SQLite from preferring the much wider epoch index.
+export function galleryFidLookupSql(n:number){
+  if(!Number.isInteger(n)||n<1||n>32)throw Error("GALLERY_FID_LOOKUP_COUNT")
+  return "WITH requested(fid) AS (VALUES "+valuesSql(n,1)+") SELECT i.* FROM requested r CROSS JOIN "+I+" i WHERE i.scope=? AND i.fid=r.fid AND +i.epoch>=?"
+}
+async function rowsByFids(g:GalleryCtx,epoch:number,fids:string[]){
+  const ids=[...new Set(fids)],out:any[]=[]
+  for(let i=0;i<ids.length;i+=32){const part=ids.slice(i,i+32);out.push(...await rows(g.db,galleryFidLookupSql(part.length),...part,g.scope,epoch))}
+  return out
+}
+export function galleryLiveLookupSql(n:number){
+  if(!Number.isInteger(n)||n<1||n>20)throw Error("GALLERY_LIVE_LOOKUP_COUNT")
+  return "WITH requested(fid,folder,mov,day) AS (VALUES "+valuesSql(n,4)+") SELECT r.fid FROM requested r WHERE (SELECT COUNT(*) FROM (SELECT 1 FROM "+I+" AS v INDEXED BY private_gallery_live_mov WHERE v.scope=? AND v.folder=r.folder AND v.kind='video' AND v.name COLLATE NOCASE=r.mov AND v.day=r.day AND +v.epoch>=? AND v.size>0 AND v.size<=104857600 LIMIT 2))=1"
+}
+export const galleryTaskCas="EXISTS (SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND fid=? AND path=? AND done=? AND page=? AND recent_page=? AND next_check=?)"
+
 
 // The ordinary list API lets admins ignore password/read_users; the discovery index
 // deliberately excludes *any* protected or hidden subtree so Memory cannot surface it.
@@ -101,13 +124,13 @@ async function ensure(g:GalleryCtx) {
     ])
     state=await getState(g)
   }
-  if(state && !state.done && Number(state.pages)===0) await query(g.db,"INSERT OR IGNORE INTO "+Q+"(scope,epoch,fid,path,depth) VALUES(?,?,'0',?,0)",g.scope,state.epoch,GALLERY_ROOT).run()
+  if(state&&!state.done&&Number(state.pages)===0&&!(await first(g.db,"SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND fid='0'",g.scope,state.epoch)))await query(g.db,"INSERT OR IGNORE INTO "+Q+"(scope,epoch,fid,path,depth) VALUES(?,?,'0',?,0)",g.scope,state.epoch,GALLERY_ROOT).run()
   return state
 }
 function publicState(s:any) {
   const used=Number(s.budget_writes??(s.day===utcDay()?Number(s.day_pages)*650:0))
   const remaining=Math.max(0,Math.floor((DAILY_WRITE_BUDGET-used)/PAGE_WRITE_RESERVE))
-  return {pages:Number(s.pages),done:!!s.done,remaining_today:remaining,estimated_writes:used,write_budget:DAILY_WRITE_BUDGET,limited:remaining===0||Number(s.pages)>=MAX_PAGES,error:String(s.error||""),completed_at:Number(s.completed_at||0),refresh_due:!!s.done&&remaining>0&&Date.now()-Number(s.completed_at||0)>=AUTO_REFRESH_MS,epoch:Number(s.epoch),revision:Number(s.revision||0),syncing:Number(s.epoch)>1&&!s.done}
+  return {pages:Number(s.pages),done:!!s.done,remaining_today:remaining,estimated_writes:used,write_budget:DAILY_WRITE_BUDGET,limited:remaining===0,error:String(s.error||""),completed_at:Number(s.completed_at||0),refresh_due:!!s.done&&remaining>0&&Date.now()-Number(s.completed_at||0)>=AUTO_REFRESH_MS,epoch:Number(s.epoch),revision:Number(s.revision||0),syncing:Number(s.epoch)>1&&!s.done}
 }
 galleryMemoryRouter.use("*",async(c,next)=>{c.header("Cache-Control","no-store, private");c.header("Referrer-Policy","no-referrer");await next()})
 // D1 single-writer lease is acquired before the network call. Every mutation is guarded
@@ -140,14 +163,15 @@ async function scanStep(g:GalleryCtx,force=false) {
   if(publicState(s).limited)return {...publicState(s),worked:false}
   if(publicState(s).refresh_due)s=await beginFull(g,s)
   const recent=!!s.done,now=Date.now(),day=utcDay(),lease=crypto.randomUUID()
+  if(s.lease&&Number(s.lease_until)>now)return {...publicState(s),worked:false,busy:true}
   const task=recent
     ?await first(g.db,"SELECT * FROM "+Q+" WHERE scope=? AND epoch=? AND done=1 AND (next_check<=? OR ?=1) ORDER BY CASE WHEN recent_page>0 THEN 0 ELSE 1 END,next_check,depth,fid LIMIT 1",g.scope,s.epoch,now,force?1:0)
-    :await first(g.db,"SELECT * FROM "+Q+" WHERE scope=? AND epoch=? AND done=0 ORDER BY depth,fid LIMIT 1",g.scope,s.epoch)
+    :await first(g.db,"SELECT * FROM "+Q+" WHERE scope=? AND epoch=? AND done=0 AND next_check<=? ORDER BY depth,fid LIMIT 1",g.scope,s.epoch,now)
   if(!task)return {...publicState(s),worked:false}
   // Atomic global budget and per-scope lease: changing mount/owner cannot reset the cap.
   const claims=await g.db.batch([
     query(g.db,"INSERT OR IGNORE INTO "+B+"(day,pages,write_units) SELECT ?,COALESCE(SUM(day_pages),0),650*COALESCE(SUM(day_pages),0) FROM "+S+" WHERE day=?",day,day),
-    query(g.db,"UPDATE "+S+" SET lease=?,lease_until=?,day_pages=CASE WHEN day=? THEN day_pages+1 ELSE 1 END,day=?,error='' WHERE scope=? AND epoch=? AND done=? AND pages<? AND (lease='' OR lease_until<?) AND (SELECT write_units FROM "+B+" WHERE day=?)<=?",lease,now+LEASE_MS,day,day,g.scope,s.epoch,recent?1:0,MAX_PAGES,now,day,DAILY_WRITE_BUDGET-PAGE_WRITE_RESERVE),
+    query(g.db,"UPDATE "+S+" SET lease=?,lease_until=?,day_pages=CASE WHEN day=? THEN day_pages+1 ELSE 1 END,day=?,error='' WHERE scope=? AND epoch=? AND done=? AND (lease='' OR lease_until<?) AND (SELECT write_units FROM "+B+" WHERE day=?)<=? AND "+galleryTaskCas,lease,now+LEASE_MS,day,day,g.scope,s.epoch,recent?1:0,now,day,DAILY_WRITE_BUDGET-PAGE_WRITE_RESERVE,g.scope,s.epoch,task.fid,task.path,Number(task.done),Number(task.page),Number(task.recent_page),Number(task.next_check)),
     query(g.db,"UPDATE "+B+" SET pages=pages+1,write_units=write_units+? WHERE day=? AND "+guard,PAGE_WRITE_RESERVE,day,g.scope,lease)
   ])
   if(!claims[1]?.meta?.changes){
@@ -203,7 +227,7 @@ async function scanStep(g:GalleryCtx,force=false) {
       batch.push(query(g.db,"UPDATE "+Q+" SET recent_page=?,next_check=?,checked_at=? WHERE scope=? AND epoch=? AND fid=? AND "+guard,finished?0:page+1,finished?due:0,finished?now:Number(task.checked_at||0),g.scope,s.epoch,task.fid,g.scope,lease))
       batch.push(query(g.db,"UPDATE "+S+" SET revision=revision+?,lease='',lease_until=0,error='' WHERE scope=? AND lease=?",media.length||unchanged.length||newFolders?1:0,g.scope,lease))
     }else{
-      batch.push(query(g.db,"UPDATE "+Q+" SET page=page+1,done=?,next_check=? WHERE scope=? AND epoch=? AND fid=? AND "+guard,result.done?1:0,0,g.scope,s.epoch,task.fid,g.scope,lease))
+      batch.push(query(g.db,"UPDATE "+Q+" SET page=?,done=?,next_check=? WHERE scope=? AND epoch=? AND fid=? AND "+guard,page+1,result.done?1:0,0,g.scope,s.epoch,task.fid,g.scope,lease))
       batch.push(query(g.db,"UPDATE "+S+" SET pages=pages+1,done=CASE WHEN EXISTS(SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND done=0) THEN 0 ELSE 1 END,completed_at=CASE WHEN EXISTS(SELECT 1 FROM "+Q+" WHERE scope=? AND epoch=? AND done=0) THEN completed_at ELSE ? END,lease='',lease_until=0,error='' WHERE scope=? AND lease=?",g.scope,s.epoch,g.scope,s.epoch,now,g.scope,lease))
     }
     const results=await g.db.batch(batch)
@@ -213,53 +237,72 @@ async function scanStep(g:GalleryCtx,force=false) {
       const actual=metrics.reduce((n:number,x:number)=>n+x,0)+12
       await query(g.db,"UPDATE "+B+" SET write_units=MAX(0,write_units+?) WHERE day=?",actual-PAGE_WRITE_RESERVE,day).run().catch(()=>{})
     }
-    return {...publicState(await getState(g)),worked:true,found:changes,recent}
-  }catch{
-    // Recent scans back off a failing folder; full scans preserve the exact page.
-    if(recent)await query(g.db,"UPDATE "+Q+" SET next_check=?,recent_page=0 WHERE scope=? AND epoch=? AND fid=? AND "+guard,now+6*HOUR,g.scope,s.epoch,task.fid,g.scope,lease).run().catch(()=>{})
-    await query(g.db,"UPDATE "+S+" SET lease='',lease_until=0,error='SCAN_RETRY' WHERE scope=? AND lease=?",g.scope,lease).run().catch(()=>{})
-    throw new Error("GALLERY_SCAN_RETRY")
+    const committed=!!results[results.length-1]?.meta?.changes
+    return {...publicState(await getState(g)),worked:committed,found:committed?changes:0,recent}
+  }catch(e){
+    // Preserve both cursors. A failing directory does not block unrelated work.
+    // A hard quota failure cannot always persist a retry marker; the lease
+    // expires and the next allowed tick resumes from the committed cursor.
+    const code=galleryErrorCode(e)
+    const retryAt=code==="DB_LIMIT"?Date.parse(day+"T00:00:00Z")+24*HOUR+5*60000:Date.now()+(recent?30:5)*60000
+    await g.db.batch([
+      query(g.db,"UPDATE "+Q+" SET next_check=? WHERE scope=? AND epoch=? AND fid=? AND "+guard,retryAt,g.scope,s.epoch,task.fid,g.scope,lease),
+      query(g.db,"UPDATE "+S+" SET lease='',lease_until=0,error=? WHERE scope=? AND lease=?",code,g.scope,lease)
+    ]).catch(()=>{})
+    console.warn("[GalleryScan] "+code)
+    throw e
   }
 }
 galleryMemoryRouter.post("/step",async(c)=>{
   const g=await context(c);if(!g)return fail(c,"此相册索引仅支持已授权的私人夸克 TV 根目录。",403)
-  try{return ok(c,await scanStep(g,true))}catch{return fail(c,"索引暂时中断，进度已保留。点击继续重试。",503)}
+  try{return ok(c,await scanStep(g,true))}catch(e){return galleryFailure(c,e,"索引暂时中断，进度已保留。")}
 })
 galleryMemoryRouter.post("/rescan",async(c)=>{
   const g=await context(c);if(!g)return fail(c,"无权操作相册索引。",403)
   const s=await ensure(g)
   // A manual refresh triggers one incremental page, not a destructive rescan.
-  try{return ok(c,s.done?await scanStep(g,true):publicState(s))}catch{return fail(c,"同步暂时中断，下次继续。",503)}
+  try{return ok(c,s.done?await scanStep(g,true):publicState(s))}catch(e){return galleryFailure(c,e,"同步暂时中断，下次继续。")}
 })
 // The cron handler never accepts an HTTP credential or user-selected path.
 // Only the existing root administrator of this private installation is eligible.
-export async function runGalleryCron(env:any,scheduledTime:number) {
+export function shouldRunGalleryCron(scheduledTime:number,fullScan:boolean){
   const t=new Date(scheduledTime),h=t.getUTCHours(),m=t.getUTCMinutes()
-  if(h<1||h>16)return
-  // Fast initial pass: once a minute. After it finishes, non-half-hour ticks
-  // read only the tiny state table; no directory requests or writes.
-  if(m!==0&&m!==30){
-    const initial=await first(env.DB,"SELECT 1 FROM "+S+" WHERE epoch=1 AND done=0 LIMIT 1")
-    if(!initial)return
+  return h>=1&&h<=16&&m%5===0&&(m%30===0||fullScan)
+}
+export async function runGalleryCron(env:any,scheduledTime:number) {
+  if(!shouldRunGalleryCron(scheduledTime,true)||!env?.DB)return
+  const regular=new Date(scheduledTime).getUTCMinutes()%30===0
+  if(!regular){
+    try{
+      if(!(await first(env.DB,"SELECT 1 FROM "+S+" WHERE done=0 LIMIT 1")))return
+      const b=await first(env.DB,"SELECT write_units FROM "+B+" WHERE day=?",utcDay())
+      if(Number(b?.write_units||0)>DAILY_WRITE_BUDGET-PAGE_WRITE_RESERVE)return
+    }catch(e){if(missingTable(e))return;throw e}
   }
   const config=await getDb(env)
   const owner=(config.users||[]).find((u:any)=>Number(u.id)===1&&u.role===2&&!u.disabled&&norm(u.base_path)==="/")
   if(!owner)return
   const g=await contextForOwner(env,owner)
   if(!g)return
-  if(m!==0&&m!==30){const s=await ensure(g);if(s.done||Number(s.epoch)!==1||publicState(s).limited)return}
+  // Do not accelerate an unrelated stale scope's unfinished generation.
+  if(!regular){const state=await getState(g);if(!state||state.done||publicState(state).limited)return}
   const result=await scanStep(g)
   if(result.worked)console.log("[GalleryCron] indexed page",{pages:result.pages,found:result.found||0,done:result.done})
+  // Stats are generated only by scheduled work, never by a page view.
+  if(regular){const state=await getState(g);if(state)await refreshGalleryStats(g,state)}
 }
 async function serialize(c:any,g:GalleryCtx,items:IndexedMedia[],epoch?:number) {
   const visible=items.filter(f=>g.allowed(f.full_path))
-  const stills=visible.filter(f=>f.kind==="image"&&f.day!=="0000-00-00"&&liveStillStem(f.name)).map(f=>f.fid)
+  const stills=visible.filter(f=>f.kind==="image"&&f.day!=="0000-00-00"&&liveStillStem(f.name))
   const live=new Set<string>()
-  if(typeof epoch==="number"&&stills.length){
-    // Outer lookup uses the scope/FID primary key; inner lookup is constrained
-    // to the partial video-name index. Never scan the full media table per tile.
-    const base="SELECT s.fid AS fid FROM "+I+" s WHERE s.scope=? AND s.epoch>=? AND s.fid IN ("+stills.map(()=>"?").join(",")+") AND (SELECT COUNT(*) FROM "+I+" AS v INDEXED BY private_gallery_live_mov WHERE v.scope=s.scope AND v.folder=s.folder AND v.kind='video' AND v.name COLLATE NOCASE=(CASE WHEN lower(s.name) LIKE '%.jpg' THEN substr(s.name,1,length(s.name)-4) ELSE substr(s.name,1,length(s.name)-5) END)||'.mov' AND v.day=s.day AND v.epoch>=? AND v.size>0 AND v.size<=104857600)=1"
-    try{for(const f of await rows(g.db,base,g.scope,epoch,...stills,epoch))live.add(f.fid)}catch{/* Optional badge must not block the album. */}
+  if(typeof epoch==="number"){
+    // The stills are already in memory. Only seek possible MOVs by the partial
+    // index, and stop after two matches. No outer scan of the media table.
+    for(let i=0;i<stills.length;i+=20){
+      const part=stills.slice(i,i+20)
+      try{for(const f of await rows(g.db,galleryLiveLookupSql(part.length),...part.flatMap(s=>[s.fid,s.folder,liveStillStem(s.name)+".mov",s.day]),g.scope,epoch))live.add(f.fid)}
+      catch(e){if(galleryErrorCode(e)==="DB_LIMIT")break}
+    }
   }
   const key=await deriveConfigEncryptionKey("private-gallery-v1:"+g.secret)
   return Promise.all(visible.map(async f=>({
@@ -277,15 +320,42 @@ async function sampleShuffle(g:GalleryCtx,s:any,cols:string,pivot:number,after:b
   const samples=await Promise.all(epochs.map(epoch=>rows(g.db,"SELECT "+cols+" FROM "+I+" INDEXED BY private_gallery_shuffle WHERE scope=? AND epoch=? AND shuffle"+(after?">=":"<")+"? ORDER BY shuffle,fid LIMIT "+limit,g.scope,epoch,pivot)))
   return samples.flat().sort((a,b)=>Number(a.shuffle)-Number(b.shuffle)||(a.fid<b.fid?-1:a.fid>b.fid?1:0)).slice(0,limit)
 }
-const statsCache=new Map<string,{key:string;value:any[];until:number}>()
-async function readGalleryStats(g:GalleryCtx,epoch:number,revision:string){
-  const cached=statsCache.get(g.scope)
-  if(cached?.key===revision&&cached.until>Date.now())return cached.value
-  const value=await rows(g.db,"SELECT substr(day,1,7) AS month,kind,COUNT(*) AS n,COALESCE(SUM(CASE WHEN tag<>'' THEN 1 ELSE 0 END),0) AS tagged FROM "+I+" WHERE scope=? AND epoch>=? GROUP BY month,kind ORDER BY month DESC",g.scope,epoch)
-  statsCache.set(g.scope,{key:revision,value,until:Date.now()+15*60*1000})
-  while(statsCache.size>4)statsCache.delete(statsCache.keys().next().value!)
-  return value
+type GalleryStats={signature:string;updated_at:number;payload:string}
+async function readGalleryStats(g:GalleryCtx):Promise<GalleryStats|null>{
+  try{return await first(g.db,"SELECT signature,updated_at,payload FROM "+A+" WHERE scope=?",g.scope)||null}
+  catch(e){if(missingTable(e))return null;throw e}
 }
+export const galleryStatsRefreshSql="INSERT INTO "+A+"(scope,signature,updated_at,payload) SELECT ?,?,?,COALESCE((SELECT json_group_array(json_object('month',month,'kind',kind,'n',n,'tagged',tagged)) FROM (SELECT substr(day,1,7) AS month,kind,COUNT(*) AS n,COALESCE(SUM(CASE WHEN tag<>'' THEN 1 ELSE 0 END),0) AS tagged FROM "+I+" WHERE scope=? AND epoch>=? GROUP BY month,kind ORDER BY month DESC)),'[]') WHERE NOT EXISTS (SELECT 1 FROM "+A+" WHERE scope=? AND (signature=? OR updated_at>?)) ON CONFLICT(scope) DO UPDATE SET signature=excluded.signature,updated_at=excluded.updated_at,payload=excluded.payload"
+// One atomic SQL statement checks the durable freshness fence before doing
+// the aggregate. Concurrent ticks cannot both publish the same refresh.
+async function refreshGalleryStats(g:GalleryCtx,s:any){
+  const now=Date.now(),signature=[s.epoch,s.pages,s.done,s.revision].join(":")
+  const previous=await readGalleryStats(g)
+  if(previous&&(previous.signature===signature||now-Number(previous.updated_at)<STATS_INTERVAL))return
+  if(!previous)await g.db.prepare(statsSchema).run()
+  const sql=galleryStatsRefreshSql
+  const result=await query(g.db,sql,g.scope,signature,now,g.scope,visibleEpoch(s),g.scope,signature,now-STATS_INTERVAL).run()
+  console.log("[GalleryStats] refreshed",{rows_read:result?.meta?.rows_read||0,rows_written:result?.meta?.rows_written||0})
+}
+function decodeStats(s:GalleryStats|null):any[]{
+  try{const value=JSON.parse(s?.payload||"[]");return Array.isArray(value)?value:[]}catch{return []}
+}
+async function reserveHeavyRead(g:GalleryCtx){
+  const snapshot=await readGalleryStats(g),count=decodeStats(snapshot).reduce((n,m)=>n+Number(m.n||0),0)
+  const reserve=Math.max(60000,Math.ceil(count*6)),day=utcDay()
+  if(reserve>HEAVY_READ_BUDGET)return null
+  const sql="INSERT INTO "+R+"(day,units) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET units=units+excluded.units WHERE units+excluded.units<=?"
+  let result:any
+  try{result=await query(g.db,sql,day,reserve,HEAVY_READ_BUDGET).run()}
+  catch(e){if(!missingTable(e))throw e;await g.db.prepare(readBudgetSchema).run();result=await query(g.db,sql,day,reserve,HEAVY_READ_BUDGET).run()}
+  return result?.meta?.changes?{day,reserve}:null
+}
+async function reconcileHeavyRead(g:GalleryCtx,claim:{day:string;reserve:number},actual:number){
+  await query(g.db,"UPDATE "+R+" SET units=MAX(0,units+?) WHERE day=?",actual-claim.reserve,claim.day).run().catch(()=>{})
+}
+// The stream index serves a single ordered date range; never rely on planner
+// selection when epoch and date indexes compete.
+export function galleryRecentSql(cols:string){return "SELECT "+cols+" FROM "+I+" INDEXED BY private_gallery_stream WHERE scope=? AND +epoch>=? ORDER BY day DESC,fid ASC LIMIT 64"}
 galleryMemoryRouter.get("/feed",async(c)=>{
   try{
     const g=await context(c);if(!g)return fail(c,"此相册索引仅支持已授权的私人夸克 TV 根目录。",403)
@@ -297,23 +367,24 @@ galleryMemoryRouter.get("/feed",async(c)=>{
     const year=Number(day.slice(0,4)),ann=[1,2,3,4,5].map(i=>String(year-i)+day.slice(4))
     const minEpoch=visibleEpoch(s)
     const groupCols="fid,folder,day,kind,tag,shuffle,CASE WHEN thumb_enc<>'' THEN '1' ELSE '' END AS thumb_enc"
-    const statsRevision=g.scope.slice(0,16)+":"+[s.epoch,s.pages,s.done,s.revision].join(":")
-    const needStats=c.req.query("stats_rev")!==statsRevision
-    const [recent,after,before,anniversary,months]=await Promise.all([
-      rows(g.db,"SELECT "+groupCols+" FROM "+I+" WHERE scope=? AND epoch>=? ORDER BY day DESC,fid LIMIT 64",g.scope,minEpoch),
+    const [recent,after,before,anniversaryParts,snapshot]=await Promise.all([
+      rows(g.db,galleryRecentSql(groupCols),g.scope,minEpoch),
       sampleShuffle(g,s,groupCols,pivot,true,112),
       sampleShuffle(g,s,groupCols,pivot,false,64),
-      rows(g.db,"SELECT "+groupCols+" FROM "+I+" WHERE scope=? AND epoch>=? AND day IN (?,?,?,?,?) ORDER BY day DESC,fid LIMIT 32",g.scope,minEpoch,...ann),
-      needStats?readGalleryStats(g,minEpoch,statsRevision):Promise.resolve(null)
+      Promise.all(ann.map(day=>rows(g.db,"SELECT "+groupCols+" FROM "+I+" INDEXED BY private_gallery_stream WHERE scope=? AND day=? AND +epoch>=? ORDER BY fid ASC LIMIT 32",g.scope,day,minEpoch))),
+      readGalleryStats(g)
     ])
+    const anniversary=anniversaryParts.flat().slice(0,32)
+    const statsRevision=snapshot?g.scope.slice(0,16)+":"+snapshot.signature:""
+    const months=snapshot&&c.req.query("stats_rev")!==statsRevision?decodeStats(snapshot):null
     const groups=buildMemoryGroups(recent,after.concat(before),anniversary,seed)
     // Homepage serializes only one cover per group. Other thumbnails and signed
     // file links are fetched lazily when the virtual memory folder is opened.
     const coverIds=groups.map(group=>group.items[0].fid)
-    const covers=coverIds.length?await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND fid IN ("+coverIds.map(()=>"?").join(",")+")",g.scope,minEpoch,...coverIds):[]
+    const covers=coverIds.length?await rowsByFids(g,minEpoch,coverIds):[]
     const coverMap=new Map((await serialize(c,g,covers,minEpoch)).map(f=>[f.id,f]))
     const cards=groups.map(group=>({id:group.id,title:group.title,subtitle:group.subtitle,count:group.items.length,ids:group.items.map(f=>f.fid),cover:coverMap.get(group.items[0].fid)||null}))
-    return ok(c,{...publicState(s),stats_revision:statsRevision,total:months?months.reduce((n,m)=>n+Number(m.n||0),0):null,tagged:months?months.reduce((n,m)=>n+Number(m.tagged||0),0):null,months:months?months.map(m=>({month:m.month,kind:m.kind,count:Number(m.n)})):null,cards})
+    return ok(c,{...publicState(s),stats_revision:statsRevision,stats_ready:!!snapshot,total:months?months.reduce((n,m)=>n+Number(m.n||0),0):null,tagged:months?months.reduce((n,m)=>n+Number(m.tagged||0),0):null,months:months?months.map(m=>({month:m.month,kind:m.kind,count:Number(m.n)})):null,cards})
   }catch(e){return galleryFailure(c,e,"暂时无法读取相册索引，请稍后重试。")}
 })
 galleryMemoryRouter.post("/memory-items",async(c)=>{
@@ -323,7 +394,7 @@ galleryMemoryRouter.post("/memory-items",async(c)=>{
     if(!Array.isArray(body.ids)||body.ids.length<1||body.ids.length>32||!body.ids.every(safeFid))return fail(c,"无效的回忆文件列表。")
     const ids=[...new Set<string>(body.ids)],s=await getState(g)
     if(!s)return ok(c,{items:[]})
-    const items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=? AND fid IN ("+ids.map(()=>"?").join(",")+")",g.scope,visibleEpoch(s),...ids)
+    const items=await rowsByFids(g,visibleEpoch(s),ids)
     const byId=new Map(items.map(f=>[f.fid,f]))
     return ok(c,{items:await serialize(c,g,ids.map(id=>byId.get(id)).filter(Boolean),visibleEpoch(s))})
   }catch(e){return galleryFailure(c,e,"暂时无法读取回忆，请稍后重试。")}
@@ -364,7 +435,7 @@ galleryMemoryRouter.post("/media-link",async(c)=>{
     if(!safeFid(body.fid)||typeof body.path!=="string")return fail(c,"无效的媒体标识。")
     if(g.hasProtectedSubtree||!!Number(g.storage.web_proxy)||String(g.storage.webdav_policy||"302_redirect")!=="302_redirect")return fail(c,"此挂载使用原有路径验证。",409)
     const s=await getState(g);if(!s)return fail(c,"媒体索引尚未建立。",404)
-    const f=await first(g.db,"SELECT fid,full_path,name,kind,size,duration_seconds FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,visibleEpoch(s))
+    const f=await first(g.db,"SELECT fid,full_path,name,kind,size,duration_seconds FROM "+I+" WHERE scope=? AND fid=? AND +epoch>=?",g.scope,body.fid,visibleEpoch(s))
     if(!f||!g.allowed(f.full_path)||f.full_path!==body.path)return fail(c,"媒体已移动、删除或需要重新同步。",404)
     const bytesMode=body.mode==="image-bytes",streamMode=body.mode==="stream"
     if(bytesMode&&(f.kind!=="image"||!/\.(heic|heif|hif|tiff?)$/i.test(f.name)||Number(f.size)<=0||Number(f.size)>MAX_COMPAT_BYTES))return fail(c,"图片超过本地兼容预览限制或格式不支持。",400)
@@ -392,9 +463,9 @@ galleryMemoryRouter.post("/live-pair",async(c)=>{
     if(!safeFid(body.fid))return fail(c,"无效的照片 ID。")
     const s=await getState(g);if(!s)return ok(c,{item:null})
     const epoch=visibleEpoch(s)
-    const still=await first(g.db,"SELECT fid,folder,full_path,name,kind,day FROM "+I+" WHERE scope=? AND fid=? AND epoch>=?",g.scope,body.fid,epoch)
+    const still=await first(g.db,"SELECT fid,folder,full_path,name,kind,day FROM "+I+" WHERE scope=? AND fid=? AND +epoch>=?",g.scope,body.fid,epoch)
     if(!still||!g.allowed(still.full_path)||still.kind!=="image"||!liveStillStem(still.name))return ok(c,{item:null})
-    const candidates=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND folder=? AND kind='video' AND name COLLATE NOCASE=? AND epoch>=? AND day=? AND size>0 AND size<=104857600 LIMIT 3",g.scope,still.folder,liveStillStem(still.name)+".mov",epoch,still.day)
+    const candidates=await rows(g.db,"SELECT * FROM "+I+" INDEXED BY private_gallery_live_mov WHERE scope=? AND folder=? AND kind='video' AND name COLLATE NOCASE=? AND +epoch>=? AND day=? AND size>0 AND size<=104857600 LIMIT 3",g.scope,still.folder,liveStillStem(still.name)+".mov",epoch,still.day)
     const pair=chooseLivePair(still,candidates.filter(f=>g.allowed(f.full_path)))
     return ok(c,{item:pair?(await serialize(c,g,[pair]))[0]:null,match:pair?"same-name-and-day":null})
   }catch(e){return galleryFailure(c,e,"暂时无法检查实况照片。")}
@@ -433,15 +504,27 @@ galleryMemoryRouter.get("/timeline",async(c)=>{
     const indexed=kind==="image"||kind==="video"?"private_gallery_stream_kind":"private_gallery_stream"
     const limit=PAGE_SIZE+1,minEpoch=visibleEpoch(s)
     let items:any[]
+    // Other sorts and substring search cannot use the default ordered index.
+    // Reserve account-friendly allowance before a potentially wide scan.
+    const expensive=plan.sort!=="new"||!!String(c.req.query("q")||"").trim()
+    const claim=expensive?await reserveHeavyRead(g):null
+    if(expensive&&!claim)return fail(c,"今日高级排序或搜索读取预算已用完。可继续使用最新优先和月份筛选。",429)
+    let actual=0,known=true
+    const read=async(sql:string,...args:any[])=>{
+      const result=await query(g.db,sql,...args).all()
+      if(claim){const n=result?.meta?.rows_read;if(typeof n==="number"&&Number.isFinite(n)&&n>=0)actual+=n;else known=false}
+      return (result.results||[]) as any[]
+    }
     if(plan.sort==="new"){
-      const base="SELECT * FROM "+I+" INDEXED BY "+indexed+" WHERE scope=? AND epoch>=?"+plan.baseWhere
+      const base="SELECT * FROM "+I+" INDEXED BY "+indexed+" WHERE scope=? AND +epoch>=?"+plan.baseWhere
       const args=[g.scope,minEpoch,...plan.baseArgs],order=" ORDER BY day DESC,fid ASC LIMIT "
       if(plan.cursor){
-        const same=await rows(g.db,base+" AND day=? AND fid>?"+order+limit,...args,plan.cursor.key,plan.cursor.fid)
-        const rest=same.length<limit?await rows(g.db,base+" AND day<?"+order+(limit-same.length),...args,plan.cursor.key):[]
+        const same=await read(base+" AND day=? AND fid>?"+order+limit,...args,plan.cursor.key,plan.cursor.fid)
+        const rest=same.length<limit?await read(base+" AND day<?"+order+(limit-same.length),...args,plan.cursor.key):[]
         items=same.concat(rest)
-      }else items=await rows(g.db,base+order+limit,...args)
-    }else items=await rows(g.db,"SELECT * FROM "+I+" WHERE scope=? AND epoch>=?"+plan.where+" ORDER BY "+plan.order+" LIMIT "+limit,g.scope,minEpoch,...plan.args)
+      }else items=await read(base+order+limit,...args)
+    }else items=await read("SELECT * FROM "+I+" WHERE scope=? AND epoch>=?"+plan.where+" ORDER BY "+plan.order+" LIMIT "+limit,g.scope,minEpoch,...plan.args)
+    if(claim&&known)await reconcileHeavyRead(g,claim,actual)
     const page=items.slice(0,PAGE_SIZE),last=page[page.length-1]
     return ok(c,{items:await serialize(c,g,page,visibleEpoch(s)),next:items.length>PAGE_SIZE&&last?{key:plan.key(last),fid:last.fid}:null,epoch:Number(s.epoch)})
   }catch(e){return galleryFailure(c,e,"暂时无法读取照片，请稍后重试。")}

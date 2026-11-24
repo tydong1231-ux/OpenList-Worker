@@ -7,3 +7,13 @@ Design reference and attribution: [Foldergram FolderGrid](https://github.com/fol
 Uses /api/me, /api/auth/login, /api/auth/logout, /api/fs/list and /api/fs/get with the original session token. Signed file links use the existing /api/d route. Thumbnail URLs are taken from the existing directory listing; small images without a thumbnail can use the signed original URL; video originals are never fetched to generate grid thumbnails. No server-side media indexing, background jobs, R2 or paid media services are introduced. Directory cache lives in the browser's memory and is cleared at logout.
 
 Browser native media support determines compatible formats and seek support. Unsupported types and password-protected directories retain the original OpenList viewer/file manager as fallback.
+
+
+## Gallery D1 usage controls
+
+- Existing media and queue records remain in place. No index rebuild, source-file download, or destructive migration is required by this release.
+- Cron runs every five minutes between 01:00 and 16:59 UTC while a complete scan is unfinished; completed galleries check incremental work on :00/:30. Daily gallery scan write allowance is 40,000 estimated D1 rows, with an atomic 1,600-row reservation and reconciliation using D1 metadata.
+- The queue cursor and lease are checked together to reject stale concurrent steps. A failed scan preserves its cursor and backs off; the weekly complete pass remains the correctness fallback for moved/deleted files.
+- Default chronological browsing, covers, random memories, anniversaries and Live Photo lookup use the existing indexes. Month/count summaries are persisted by scheduled work at most every two hours when the index changes (first summary is populated by a regular scheduled run). The UI marks counts as approximate and indicates when a summary is pending.
+- Substring search and non-default sorts can still scan wider ranges. They have a separate shared 500,000-row daily estimated allowance; once depleted, default chronological browsing and month filters remain available. Allowances reset at UTC midnight and are app-level safeguards, not a guarantee against unrelated D1 account activity or unreported D1 metadata.
+- The local SQLite regression checks query plans, live-photo uniqueness, stale lease rejection and summary refresh fencing without accessing a production database.

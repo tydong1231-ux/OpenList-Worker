@@ -45,7 +45,14 @@ test("album defaults to indexed feed and renders a virtual continuous timeline",
  assert.match(galleryHtml,/id="mediaMonth"/)
  assert.match(galleryJs,/if\(location.hash\)showFiles/)
  assert.match(galleryJs,/renderTimelineWindow/)
- assert.match(galleryJs,/refresh_due/)
+ assert.match(galleryJs,/Cron owns all automatic sync/)
  assert.match(galleryJs,/memNext/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})
+
+
+test("browser does not automatically invoke scan steps",()=>{
+ assert.doesNotMatch(galleryJs,/setTimeout\(memoryStep/)
+ assert.match(galleryJs,/memorySync"\)\.onclick/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })

@@ -47,7 +47,7 @@ export class DriverQuarkUcTv implements StorageDriver {
   }
 
   /** Metadata-only index uses a FID from the server-owned scan queue. */
-  async getIndexPage(fid: string, page: number) { return this.client.getIndexPage(fid, page) }
+  async getIndexPage(fid: string, page: number, recent = false) { return this.client.getIndexPage(fid, page, recent) }
 
   /** Called only with a server-verified, mount-scoped directory locator. */
   async listByDirectoryId(physicalPath: string, fid: string, timing?: QuarkListTiming): Promise<FileItem[]> {

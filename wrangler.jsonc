@@ -24,6 +24,8 @@
   "keep_vars": true,
   // Free, reversible latency experiment for overseas D1 + Quark API.
   "placement": { "mode": "smart" },
+  // 09:00-00:30 China Standard Time. One free Cron Trigger.
+  "triggers": { "crons": ["0,30 1-16 * * *"] },
   "routes": [{ "pattern": "drive.botly.cc", "custom_domain": true }],
   "assets": {
     "directory": "./dist",

@@ -257,7 +257,12 @@ test("HEIC embedded motion supports standard mpvd and concatenated MOV, not stat
  const audio=bytes(ftyp("isom"),box("mdat",Buffer.from([1])),box("moov",box("trak",box("mdia",box("hdlr",Buffer.alloc(8),Buffer.from("soun"))))));
  assert.notEqual(inspect(ab(bytes(image,box("mpvd",audio)))).kind,"motion");
  const extended=Buffer.alloc(16);extended.writeUInt32BE(1);extended.write("mpvd",4);extended.writeBigUInt64BE(BigInt(movie.length+16),8);
- const wide=bytes(image,extended,movie);result=inspect(ab(wide));assert.equal(result.kind,"motion");assert.equal(result.videoStart,image.length+16)
+ const wide=bytes(image,extended,movie);result=inspect(ab(wide));assert.equal(result.kind,"motion");assert.equal(result.videoStart,image.length+16);
+ const zero=Buffer.alloc(8);zero.write("mdat",4);
+ const zeroStill=bytes(ftyp("heic"),box("meta",Buffer.alloc(12)),zero,Buffer.from([1,2,3,4]));
+ result=inspect(ab(bytes(zeroStill,movie)));assert.equal(result.kind,"motion");assert.equal(result.stillEnd,zeroStill.length);
+ const idatStill=bytes(ftyp("heic"),box("meta",Buffer.alloc(4),box("idat",Buffer.from([1,2,3]))));
+ result=inspect(ab(bytes(idatStill,box("mpvd",movie))));assert.equal(result.kind,"motion");assert.equal(result.stillEnd,idatStill.length)
 })
 
 test("HEIC Live badge and player are lazy, use local assets and preserve existing gestures",()=>{
@@ -276,4 +281,30 @@ test("HEIC Live badge and player are lazy, use local assets and preserve existin
  assert.match(galleryJs,/cancelPhotoHold\(\);if\(livePlaying\)stopLive\(\)/);
  assert.match(galleryCss,/\.preview \.stage>\.live-kit\{[^}]*pointer-events:none/);
  assert.doesNotThrow(()=>new Script(galleryJs))
+})
+
+
+test("motion badges distinguish tentative HEICs, confirmed motion and static stills without fetching",()=>{
+ const a=galleryJs.indexOf("const motionStatuses="),b=galleryJs.indexOf("let livePartner=",a);
+ assert.ok(a>=0&&b>a);
+ const logic=new Function('const path="/album",child=(p,n)=>p+"/"+n;const document={querySelectorAll:()=>[]};'+galleryJs.slice(a,b)+';return {motionBadgeState,updateMotionBadges}')();
+ const f={id:"x",name:"IMG_1.HEIC",size:4000000,day:"2026-11-24"};
+ assert.equal(logic.motionBadgeState(f),"candidate");
+ logic.updateMotionBadges(f,"motion");assert.equal(logic.motionBadgeState({...f}),"confirmed");
+ assert.equal(logic.motionBadgeState({...f,size:5000000}),"candidate");
+ const g={...f,id:"y"};
+ logic.updateMotionBadges(g,"static");assert.equal(logic.motionBadgeState(g),"");
+ assert.equal(logic.motionBadgeState(g,true),"paired");
+ assert.equal(logic.motionBadgeState({id:"jpg",name:"still.jpg"}),"")
+})
+
+test("release invalidates pending native playback and revokes embedded media when switching",async()=>{
+ const a=galleryJs.indexOf("let livePartner="),b=galleryJs.indexOf("// Gesture math is independent",a);
+ assert.ok(a>=0&&b>a);
+ const setup='let selected={name:"a.HEIC"},previewGeneration=1,previewAbort={signal:{aborted:false}},photoZoom={scale:1};const revoked=[],created=[],events=[];const nodes={liveButton:{hidden:true,disabled:false,setAttribute(){}},previewHint:{},stage:{classList:{add(){},remove(){}},append(n){created.push(n)}}};const $=k=>nodes[k];const document={addEventListener(){},createElement(){return {canPlayType:()=> "maybe"}}};const window={addEventListener(){}};const URL={createObjectURL:()=>"blob:live-test",revokeObjectURL:v=>revoked.push(v)};function el(){return {setAttribute(){},classList:{add(){}},pause(){events.push("pause")},removeAttribute(){},load(){},remove(){events.push("remove")},play(){events.push("play");return Promise.resolve()}}}let resolveLink;const resolveMediaLink=()=>new Promise(r=>resolveLink=r);';
+ const h=new Function(setup+galleryJs.slice(a,b)+';return {reveal:revealLive,start:startLive,stop:stopLive,reset:resetLive,resolve:v=>resolveLink(v),events,created,revoked}')();
+ h.reveal({full_path:"/clip.mov"});h.start(true);h.stop();h.resolve("https://example.test/movie.mov");await Promise.resolve();await Promise.resolve();
+ assert.equal(h.created.length,0,"released hold cannot attach stale MOV");
+ h.reveal({embedded:true,bytes:new ArrayBuffer(8),mime:"video/mp4"});h.start(true);assert.equal(h.created.length,1);
+ h.reset();assert.deepEqual(h.revoked,["blob:live-test"]);assert.ok(h.events.includes("pause"));assert.ok(h.events.includes("remove"))
 })

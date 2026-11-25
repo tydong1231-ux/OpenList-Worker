@@ -44,23 +44,39 @@ try{
  'const phase=new URLSearchParams(location.search).get("phase"),cors='+JSON.stringify(cors)+',opaque='+JSON.stringify(opaque)+';'+
  '(async()=>{await ready();const suffix=phase==="1"?"/valid":"/expired";const c=await image("readable",cors+suffix),o=await image("opaque",opaque+suffix);verify(c.classList.contains("loaded")&&o.classList.contains("loaded"),"readable/opaque thumbnail must decode");verify(c._thumbRoute&&o._thumbRoute,"must use mapped thumbnail route");'+
  'if(phase==="1"){await until(async()=>await count("gallery-thumb-readable-v1")===1&&await count("gallery-thumb-opaque-v1")===1,"cache writes missing");const keys=await(await caches.open("gallery-thumb-readable-v1")).keys();verify(new URL(keys[0].url).searchParams.get("p")==="1","launch image not prioritized");verify(!keys[0].url.includes("valid")&&!keys[0].url.includes("test-session"),"signed URL/session must not be a cache key")}'+
- 'else{const broken=await image("missing",cors+"/expired");verify(!broken.classList.contains("loaded")&&getComputedStyle(broken).opacity==="0","failed image glyph is visible");clearLocalThumbCache();await until(async()=>await count("gallery-thumb-readable-v1")===0&&await count("gallery-thumb-opaque-v1")===0,"logout cache not cleared")}document.body.dataset.test="pass"})().catch(e=>{document.body.dataset.test="fail";document.body.append(document.createTextNode(String(e.stack||e)))});'
+ 'else{const broken=await image("missing",cors+"/expired");verify(!broken.classList.contains("loaded")&&getComputedStyle(broken).opacity==="0","failed image glyph is visible");clearLocalThumbCache();await until(async()=>await count("gallery-thumb-readable-v1")===0&&await count("gallery-thumb-opaque-v1")===0,"logout cache not cleared")}document.body.dataset.test="pass";await fetch("/@test-result",{method:"POST",body:"pass"})})().catch(e=>{document.body.dataset.test="fail";fetch("/@test-result",{method:"POST",body:String(e.stack||e)})});'
+ let report=null;
  const port=await listen(http.createServer((req,res)=>{
   const url=new URL(req.url,"http://localhost")
+  if(url.pathname==="/@test-result"&&req.method==="POST"){
+   let body="";req.on("data",b=>body+=b);req.on("end",()=>{res.writeHead(200);res.end("ok");report?.(body)});return
+  }
   if(url.pathname==="/@gallery-sw.js"){res.writeHead(200,{"Content-Type":"application/javascript","Cache-Control":"no-store","Service-Worker-Allowed":"/"});res.end(galleryServiceWorker);return}
   if(url.pathname==="/"){res.writeHead(200,{"Content-Type":"text/html","Cache-Control":"no-store"});res.end("<!doctype html><style>"+galleryCss+"</style><body><div id='timelineGrid'></div><script>"+fixture+helpers+assertions+"</script></body>");return}
   res.writeHead(404);res.end()
  }))
  async function browser(phase){
-  const args=["--headless","--no-sandbox","--disable-dev-shm-usage","--ignore-certificate-errors","--disable-gpu","--no-first-run","--window-size=900,900","--user-data-dir="+path.join(dir,"profile"),"--virtual-time-budget=20000","--dump-dom","http://127.0.0.1:"+port+"/?phase="+phase]
-  const out=await new Promise((resolve,reject)=>{
-   const p=spawn(chrome,args);let stdout="",stderr="";
-   const timer=setTimeout(()=>{p.kill("SIGKILL");reject(Error("Chrome timeout"))},45000);
-   p.stdout.on("data",b=>stdout+=b);p.stderr.on("data",b=>stderr+=b);
-   p.once("error",e=>{clearTimeout(timer);reject(e)});
-   p.once("close",code=>{clearTimeout(timer);resolve({code,stdout,stderr})})
-  })
-  if(out.code!==0||!out.stdout.includes('data-test="pass"'))throw Error("Browser phase "+phase+" failed: "+out.stdout.slice(-1500)+"\n"+out.stderr.slice(-800))
+  // A virtual-time dump can finish before the service worker's real network
+  // events fire. Keep Chromium alive and wait for the in-page assertion report.
+  const profile=path.join(dir,"profile"),args=["--headless","--no-sandbox","--disable-dev-shm-usage","--ignore-certificate-errors","--disable-gpu","--no-first-run","--window-size=900,900","--remote-debugging-port=0","--user-data-dir="+profile,"http://127.0.0.1:"+port+"/?phase="+phase];
+  let stderr="",timer,p;
+  try{
+   const result=await new Promise((resolve,reject)=>{
+    report=resolve;p=spawn(chrome,args);
+    p.stderr.on("data",b=>{stderr=(stderr+b).slice(-6000)});p.stdout.resume();
+    timer=setTimeout(()=>reject(Error("Browser phase "+phase+" report timeout")),35000);
+    p.once("error",reject);p.once("exit",code=>reject(Error("Chrome exited before report: "+code)))
+   });
+   if(result!=="pass")throw Error("Browser phase "+phase+" failed: "+result);
+  }catch(e){throw Error(String(e)+"\n"+stderr)}
+  finally{
+   clearTimeout(timer);report=null;
+   if(p&&p.exitCode===null&&p.signalCode===null){
+    // SIGTERM lets Chromium flush its persistent storage before restart.
+    p.kill("SIGTERM");
+    await new Promise(resolve=>{const kill=setTimeout(()=>{p.kill("SIGKILL")},5000);p.once("close",()=>{clearTimeout(kill);resolve()});if(p.exitCode!==null||p.signalCode!==null){clearTimeout(kill);resolve()}})
+   }
+  }
  }
  await browser(1);const first={...counts};
  if(first.cors!==1||first.opaque<1||first.opaque>2)throw Error("Unexpected first load requests: "+JSON.stringify(first))

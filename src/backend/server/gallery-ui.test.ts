@@ -77,7 +77,7 @@ test("preview fits whole photos and videos in a bounded viewport",()=>{
 })
 
 
-test("gallery install assets use dedicated same-origin manifest and network-only service worker",()=>{
+test("gallery install assets use dedicated same-origin manifest and thumbnail-only service worker",()=>{
  assert.match(galleryHtml,/rel="manifest" href="\/@gallery.webmanifest"/)
  assert.match(galleryHtml,/apple-mobile-web-app-capable/)
  assert.match(galleryJs,/beforeinstallprompt/)
@@ -386,4 +386,19 @@ test("MOV orientation matrices select native rendering for rotated, mirrored, au
  assert.equal(safe(movie([track("vide",identity,2)])),false)
  assert.match(galleryJs,/pair\.kitSafe!==true\|\|livePlayer/)
  assert.match(galleryJs,/kitSafe:motion\.kitSafe===true/)
+})
+
+
+test("private thumbnail cache is identity-keyed, opt-in per visible tile and gracefully falls back",()=>{
+ assert.match(galleryJs,/function thumbIdentity/)
+ assert.match(galleryJs,/crypto\.subtle\.digest\("SHA-256"/)
+ assert.match(galleryJs,/gallery-thumb-map/)
+ assert.match(galleryJs,/startThumbWhenVisible\(img,\(\)=>setThumbSource\(img,url\)\)/)
+ assert.match(galleryJs,/if\(url\)\{setThumbSource\(img,url,false\);return\}/)
+ assert.match(galleryJs,/clearLocalThumbCache\(\)/)
+ assert.match(galleryJs,/detachThumbs\(node\)/)
+ assert.match(galleryCss,/\.gallery-thumb\{opacity:0!important/)
+ assert.match(galleryCss,/\.gallery-thumb\.loaded\{opacity:1!important/)
+ assert.match(galleryCss,/\.thumb-placeholder\[data-thumb-tone="3"\]/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
 })

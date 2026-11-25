@@ -74,6 +74,9 @@ jobs:
       - name: Live Photo layout and touch gestures in headless Chromium
         run: pnpm exec tsx scripts/test-gallery-live-browser.mjs
 
+      - name: Gallery thumbnail cache across browser reloads
+        run: pnpm exec tsx scripts/test-gallery-thumbnail-browser.mjs
+
       - name: Fetch official frontend dist
         run: node scripts/fetch-frontend.mjs
 

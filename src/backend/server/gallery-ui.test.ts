@@ -308,3 +308,32 @@ test("release invalidates pending native playback and revokes embedded media whe
  h.reveal({embedded:true,bytes:new ArrayBuffer(8),mime:"video/mp4"});h.start(true);assert.equal(h.created.length,1);
  h.reset();assert.deepEqual(h.revoked,["blob:live-test"]);assert.ok(h.events.includes("pause"));assert.ok(h.events.includes("remove"))
 })
+
+
+test("Quark actual LIVP layout: little endian uuid header and redundant 12 byte footer",()=>{
+ const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("const motionStatuses=",a)
+ const inspect=new Function(galleryJs.slice(a,b)+";return inspectEmbeddedMotion")()
+ const box=(type:string,...parts:Buffer[])=>{const payload=Buffer.concat(parts),h=Buffer.alloc(8);h.writeUInt32BE(payload.length+8);h.write(type,4,"ascii");return Buffer.concat([h,payload])}
+ const ftyp=(brand:string)=>box("ftyp",Buffer.from(brand),Buffer.alloc(4),Buffer.from(brand))
+ const still=Buffer.concat([ftyp("heic"),box("meta",Buffer.alloc(12)),box("mdat",Buffer.alloc(40,7))])
+ const mov=Buffer.concat([ftyp("qt  "),box("wide"),box("mdat",Buffer.alloc(64,2)),box("moov",box("trak",box("mdia",box("hdlr",Buffer.alloc(8),Buffer.from("vide"),Buffer.alloc(12)))))])
+ const header=Buffer.alloc(16);header.writeUInt32LE(mov.length+16);header.write("uuid",4)
+ const footer=Buffer.alloc(12);footer.write("livp");footer.writeUInt32LE(0x1102,4);footer.writeUInt32LE(mov.length,8)
+ const original=Buffer.concat([still,header,mov,footer]),ab=(b:Buffer)=>Uint8Array.from(b).buffer
+ const result=inspect(ab(original))
+ assert.equal(result.kind,"motion");assert.equal(result.container,"quark-livp")
+ assert.equal(result.stillEnd,still.length);assert.equal(result.videoStart,still.length+16);assert.equal(result.videoEnd,original.length-12)
+ assert.deepEqual(original.subarray(result.videoStart,result.videoEnd),mov)
+ const invalid=Buffer.from(original);invalid.writeUInt32LE(mov.length+1,invalid.length-4);assert.notEqual(inspect(ab(invalid)).kind,"motion")
+ const invalid2=Buffer.from(original);invalid2.writeUInt32LE(mov.length+17,still.length);assert.notEqual(inspect(ab(invalid2)).kind,"motion")
+ const fake=Buffer.concat([ftyp("heic"),box("meta",Buffer.alloc(12)),box("mdat",Buffer.concat([header,mov])),footer]);assert.notEqual(inspect(ab(fake)).kind,"motion")
+})
+test("indexed thumbnail recovery is lazy and shared for photos and videos",()=>{
+ assert.match(galleryJs,/if\(f.id&&f.folder\)return indexedThumbImage\(f,cls,url\)/)
+ assert.match(galleryJs,/\/admin\/gallery-memory\/thumbnail-page/)
+ assert.match(galleryJs,/galleryThumbCalls.length>=24/)
+ assert.match(galleryJs,/applyGalleryThumbResults\(data\?\.items\)/)
+ assert.match(galleryJs,/galleryThumbObserver\.observe\(img\)/)
+ assert.match(galleryJs,/if\(!video.videoWidth\|\|!video.videoHeight\)/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})

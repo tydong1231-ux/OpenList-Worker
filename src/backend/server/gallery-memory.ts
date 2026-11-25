@@ -484,6 +484,79 @@ galleryMemoryRouter.post("/live-pair",async(c)=>{
     return ok(c,{item:pair?(await serialize(c,g,[pair]))[0]:null,match:pair?"same-name-and-day":null})
   }catch(e){return galleryFailure(c,e,"暂时无法检查实况照片。")}
 })
+// Thumbnail URLs expire independently from the durable index. Page plans are
+// small derived hints, never a second authoritative media index. Resolve only
+// a visible, authorized anchor by FID; upstream responses are matched by FID.
+const TP="private_gallery_thumbnail_plan",TP_TTL=12*HOUR
+const thumbPlanSchema="CREATE TABLE IF NOT EXISTS "+TP+" (scope TEXT NOT NULL,folder TEXT NOT NULL,updated_at INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,folder))"
+export function galleryThumbPlanSql(){
+ return "SELECT json_group_array(fid) AS payload FROM (SELECT fid FROM "+I+" WHERE scope=? AND folder=? AND +epoch>=? ORDER BY name COLLATE NOCASE,fid LIMIT 30001)"
+}
+async function readThumbPlan(g:GalleryCtx,folder:string){
+ try{return await first(g.db,"SELECT updated_at,payload FROM "+TP+" WHERE scope=? AND folder=?",g.scope,folder)}
+ catch(e){if(!missingTable(e))throw e;return null}
+}
+async function thumbPageHint(g:GalleryCtx,s:any,f:any){
+ const cached=await readThumbPlan(g,f.folder),now=Date.now()
+ function findPlan(v:any){try{const ids=JSON.parse(v?.payload||"[]");return Array.isArray(ids)?ids.indexOf(f.fid):-1}catch{return -1}}
+ const hit=findPlan(cached)
+ if(cached&&(now-Number(cached.updated_at)<TP_TTL&&hit>=0||now-Number(cached.updated_at)<10*60000))return hit<0?null:Math.floor(hit/100)
+ // One bounded SQL scan per folder per 12h. Share the existing heavy-read
+ // allowance; if unavailable, no unbounded scan or quota bypass occurs.
+ const claim=await reserveHeavyRead(g);if(!claim)return null
+ let actual:number|undefined
+ try{
+  const result=await query(g.db,galleryThumbPlanSql(),g.scope,f.folder,visibleEpoch(s)).all()
+  actual=Number(result.meta?.rows_read)
+  const payload=String(result.results?.[0]?.payload||"[]")
+  if(payload.length>1500000)return null
+  await g.db.prepare(thumbPlanSchema).run()
+  await query(g.db,"INSERT INTO "+TP+"(scope,folder,updated_at,payload) VALUES(?,?,?,?) ON CONFLICT(scope,folder) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload",g.scope,f.folder,now,payload).run()
+  const index=findPlan({payload})
+  return index<0?null:Math.floor(index/100)
+ }finally{if(Number.isFinite(actual)&&actual!>=0)await reconcileHeavyRead(g,claim,actual!)}
+}
+galleryMemoryRouter.post("/thumbnail-page",async(c)=>{
+ try{
+  const g=await context(c);if(!g)return fail(c,"无权读取相册缩略图。",403)
+  const body=await c.req.json().catch(()=>({}));if(!safeFid(body.fid))return fail(c,"无效媒体标识。")
+  const s=await getState(g);if(!s)return ok(c,{items:[]})
+  const f=await first(g.db,"SELECT fid,folder,name,full_path FROM "+I+" WHERE scope=? AND fid=? AND +epoch>=?",g.scope,body.fid,visibleEpoch(s))
+  if(!f||!g.allowed(f.full_path)||!g.allowed(f.folder))return fail(c,"媒体不在当前相册。",404)
+  const parent=f.folder===GALLERY_ROOT?{fid:"0",page:0}:await first(g.db,"SELECT fid,page,done FROM "+Q+" WHERE scope=? AND epoch>=? AND path=? ORDER BY epoch DESC LIMIT 1",g.scope,visibleEpoch(s),f.folder)
+  if(!parent||!safeFid(parent.fid))return ok(c,{items:[]})
+  const driver=await getDriver(g.storage.driver,g.storage);if(!(driver instanceof DriverQuarkUcTv))return fail(c,"存储配置已变化。",409)
+  const found=new Map<string,string>(),visited=new Set<number>();let calls=0
+  const visit=async(page:number,recent:boolean)=>{
+   if(!Number.isSafeInteger(page)||page<0||page>10000||visited.has(page)||calls>=4)return null
+   visited.add(page);calls++
+   const result=await driver.getIndexPage(parent.fid,page,recent)
+   for(const item of result.files){
+    if(Number(item.isdir)===1||!safeFid(item.fid)||!safeName(item.filename)||!mediaKind(item.filename)||!g.allowed(f.folder+"/"+item.filename))continue
+    const thumb=safeThumb(item.thumbnail_url);if(thumb)found.set(item.fid,thumb)
+   }
+   return result
+  }
+  if(body.recent===true)await visit(0,true)
+  else{
+   const hint=await thumbPageHint(g,s,f)
+   if(hint===null)return ok(c,{items:[]})
+   // Full-scan list order is filename ascending. Local rank is only a hint:
+   // non-media items, natural collation and concurrent uploads can shift it.
+   let page=Math.min(10000,Math.max(0,hint)),result=await visit(page,false)
+   if(!found.has(f.fid)&&result){
+    const max=typeof result.total==="number"?Math.max(0,Math.ceil(result.total/100)-1):10000
+    if(page>max){page=max;result=await visit(page,false)}
+    const target=f.name.toLowerCase(),names=result?.files?.filter(x=>!Number(x.isdir)).map(x=>String(x.filename||"").toLowerCase())||[]
+    const direction=names.length&&target<names[0]?-1:names.length&&target>names[names.length-1]?1:0
+    const alternatives=direction?[page+direction,page+2*direction,page-direction]:[page-1,page+1,page+2]
+    for(const p of alternatives)if(!found.has(f.fid)&&p>=0&&p<=max)await visit(p,false)
+   }
+  }
+  return ok(c,{items:[...found].map(([id,thumb])=>({id,thumb})),found:found.has(f.fid)})
+ }catch(e){return galleryFailure(c,e,"缩略图刷新暂时不可用。")}
+})
+
 // Fixed sort expressions, all client inputs bound; stable keyset cursor avoids OFFSET scans.
 export function timelineQuery(params: {sort?:string;kind?:string;month?:string;q?:string;key?:string;fid?:string}) {
   const sort=["new","old","name","size"].includes(params.sort||"")?params.sort:"new"

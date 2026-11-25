@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { ClientQuarkUcTv, tokenTransportError } from "./util"
+import { ClientQuarkUcTv, tokenTransportError, quarkTvAccountFingerprint } from "./util"
 import type { DriverQuarkUcTvAddition } from "./types"
 
 test("TV authorization exchanges code using the same device and persists rotation", async () => {
@@ -11,7 +11,7 @@ test("TV authorization exchanges code using the same device and persists rotatio
   globalThis.fetch = (async (input: any, init?: RequestInit) => {
     const url = new URL(String(input))
     assert.equal(url.protocol, "https:")
-    if (url.pathname === "/token") {
+    if (url.pathname === "/quarkdrive/token") {
       const body = JSON.parse(String(init?.body))
       assert.equal(body.device_id, addition.device_id)
       calls.push(body.code ? "code" : "refresh")
@@ -30,7 +30,7 @@ test("TV authorization exchanges code using the same device and persists rotatio
     }
     if (url.pathname === "/user") {
       assert.equal(url.searchParams.get("access_token"), "access-one")
-      return Response.json({ status: 200, errno: 0 })
+      return Response.json({ status: 200, errno: 0, data: { user_id: "test-account-1" } })
     }
     if (url.pathname === "/file") {
       const method = url.searchParams.get("method")
@@ -46,7 +46,7 @@ test("TV authorization exchanges code using the same device and persists rotatio
     assert.equal(qr.queryToken, "test-query")
     assert.equal(qr.deviceId, addition.device_id)
     await client.completeLogin(qr.queryToken)
-    await client.verifyLogin()
+    assert.equal(await client.verifyLogin(),await quarkTvAccountFingerprint({data:{user_id:"test-account-1"}},"quark"))
     assert.equal(addition.refresh_token, "refresh-one")
     assert.equal(persisted[0].access_token, "access-one")
     assert.equal(await client.getDownloadUrl("pdf", false), "https://example.com/file.pdf")

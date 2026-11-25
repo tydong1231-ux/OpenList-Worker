@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { getDb } from "../internal/model/db"
 import { getDriver } from "../internal/op/storage"
 import { DriverQuarkUcTv } from "../drivers/quark_uc_tv/driver"
+import { galleryScopeForMount, pinGalleryMountIdentity } from "./gallery-mount-identity"
 import { getDisableIndex } from "../internal/driver/storageopts"
 import { getUserFromContext, getJwtSecret } from "./middlewares"
 import { deriveConfigEncryptionKey, encryptConfigValue, decryptConfigValue, sha256 } from "../pkg/crypto"
@@ -79,8 +80,8 @@ async function contextForOwner(env:any,user:any) {
   const excluded=[...new Set([...blocked,...nested])].sort()
   const allowed=(p:string)=>under(p,GALLERY_ROOT)&&!excluded.some(x=>under(p,x))
   if(!allowed(GALLERY_ROOT)) return null
-  const scope=await sha256(JSON.stringify(["private-gallery-v1",user.id,storage.id,storage.modified,GALLERY_ROOT,excluded]))
-  return {db,storage,scope,allowed,hasProtectedSubtree:excluded.some(p=>under(p,GALLERY_ROOT)),secret:await getJwtSecret({env})}
+  const {scope,binding}=await galleryScopeForMount(db,user.id,storage,GALLERY_ROOT,excluded)
+  return {db,storage,scope,binding,allowed,hasProtectedSubtree:excluded.some(p=>under(p,GALLERY_ROOT)),secret:await getJwtSecret({env})}
 }
 type GalleryCtx=NonNullable<Awaited<ReturnType<typeof context>>>
 async function getState(g:GalleryCtx) {
@@ -284,6 +285,19 @@ export async function runGalleryCron(env:any,scheduledTime:number) {
   if(!owner)return
   const g=await contextForOwner(env,owner)
   if(!g)return
+  // Pin an existing installation while its current credentials are still valid.
+  // While not yet pinned, retry at each scheduled active tick (the first
+  // successful pin makes all subsequent gallery identity checks D1-only).
+  if(!g.binding){
+    try{
+      const driver=await getDriver(g.storage.driver,g.storage)
+      if(driver instanceof DriverQuarkUcTv){
+        const accountHash=await driver.verifyAccountIdentity()
+        if(accountHash)await pinGalleryMountIdentity(g.db,g.storage,accountHash)
+        else console.warn("[GalleryIdentity] ACCOUNT_ID_UNAVAILABLE")
+      }
+    }catch{console.warn("[GalleryIdentity] PIN_RETRY")}
+  }
   // Do not accelerate an unrelated stale scope's unfinished generation.
   if(!regular){const state=await getState(g);if(!state||state.done||publicState(state).limited)return}
   const result=await scanStep(g)

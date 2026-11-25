@@ -78,6 +78,24 @@ function objectData(v: any): Record<string, any> {
   return v && typeof v === "object" && !Array.isArray(v) ? v : {}
 }
 
+// Accept only explicit account identifiers from the authenticated user-info
+// response; never infer identity from a nickname, device, token or file count.
+// An unknown response format must fail closed when linking an existing index.
+export async function quarkTvAccountFingerprint(response:any,variant:string):Promise<string|null>{
+  const data=objectData(response?.data),profile=objectData(data.user_info)
+  const sources=[data,profile,objectData(response?.user_info),objectData(response)]
+  for(const key of ["user_id","uid","account_id"]){
+    const candidates=new Set<string>()
+    for(const source of sources){
+      const value=source[key]
+      const id=typeof value==="string"?value.trim():typeof value==="number"&&Number.isSafeInteger(value)&&value>0?String(value):""
+      if(id&&/^[A-Za-z0-9_-]{1,256}$/.test(id)&&!/^0+$/.test(id)&&!/^(null|undefined|unknown|anonymous)$/i.test(id))candidates.add(id)
+    }
+    if(candidates.size>1)return null
+    if(candidates.size===1)return sha256(JSON.stringify(["quark-tv-account-v1",variant,key,[...candidates][0]]))
+  }
+  return null
+}
 export interface QuarkListTiming { calls: number; upstream_ms: number }
 
 export class ClientQuarkUcTv {
@@ -256,9 +274,10 @@ export class ClientQuarkUcTv {
     }
   }
 
-  async verifyLogin(): Promise<void> {
+  async verifyLogin(): Promise<string|null> {
     try {
-      await this.request("/user", "GET", { method: "user_info" })
+      const response=await this.request("/user", "GET", { method: "user_info" })
+      return quarkTvAccountFingerprint(response,this.conf===CONFS.uc?"uc":"quark")
     } catch (e) {
       if (e instanceof QuarkTvError) throw new QuarkTvError("VERIFY_" + e.diagnostic, "验证夸克账号失败：" + e.message)
       throw e

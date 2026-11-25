@@ -286,8 +286,9 @@ export async function runGalleryCron(env:any,scheduledTime:number) {
   const g=await contextForOwner(env,owner)
   if(!g)return
   // Pin an existing installation while its current credentials are still valid.
-  // Check only on ordinary half-hour ticks; once pinned there is no extra TV call.
-  if(regular&&!g.binding){
+  // While not yet pinned, retry at each scheduled active tick (the first
+  // successful pin makes all subsequent gallery identity checks D1-only).
+  if(!g.binding){
     try{
       const driver=await getDriver(g.storage.driver,g.storage)
       if(driver instanceof DriverQuarkUcTv){

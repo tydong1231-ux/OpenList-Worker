@@ -93,7 +93,7 @@ test("compact album keeps sync in menu, sticky filters, saved five-stage grid an
  assert.match(galleryJs,/store\("gallery-media-density",value\)/)
  assert.match(galleryJs,/\[1,2,3,4,6\]/)
  assert.match(galleryJs,/memoryPullDistance>=110/)
- assert.match(galleryJs,/if\(f.live\)addLiveBadge/)
+ assert.match(galleryJs,/if\(f.kind==="image"\)addLiveBadge\(b,f\)/)
  assert.doesNotMatch(galleryJs,/已加载 "\+memPageItems/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
@@ -228,4 +228,52 @@ test("appending across a partial date row never moves already loaded photos",()=
   for(const id of Object.keys(previous))assert.equal(current[id],previous[id])
   assert.ok(fresh.height>old.height)
  }
+})
+
+
+test("HEIC embedded motion supports standard mpvd and concatenated MOV, not static HEIC or fake signatures",()=>{
+ const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("const motionStatuses=",a);
+ assert.ok(a>=0&&b>a);
+ const inspect=new Function(galleryJs.slice(a,b)+";return inspectEmbeddedMotion")();
+ const bytes=(...parts:Buffer[])=>Buffer.concat(parts);
+ const box=(type:string,...parts:Buffer[])=>{const payload=bytes(...parts),h=Buffer.alloc(8);h.writeUInt32BE(payload.length+8);h.write(type,4,"ascii");return bytes(h,payload)};
+ const ftyp=(brand:string)=>box("ftyp",Buffer.from(brand),Buffer.alloc(4),Buffer.from(brand));
+ const hdlr=box("hdlr",Buffer.alloc(8),Buffer.from("vide"),Buffer.alloc(12));
+ const movie=bytes(ftyp("qt  "),box("mdat",Buffer.from([1,2,3,4])),box("moov",box("trak",box("mdia",hdlr))));
+ const image=bytes(ftyp("heic"),box("meta",Buffer.alloc(12)),box("mdat",Buffer.from([1,2,3,4])));
+ const ab=(buf:Buffer)=>Uint8Array.from(buf).buffer;
+ const wrapped=bytes(image,box("mpvd",movie));
+ let result=inspect(ab(wrapped));
+ assert.equal(result.kind,"motion");assert.equal(result.stillEnd,image.length);assert.equal(result.videoStart,image.length+8);assert.equal(result.videoEnd,wrapped.length);assert.equal(result.mime,"video/quicktime");
+ assert.deepEqual(wrapped.subarray(result.videoStart,result.videoEnd),movie);
+ const appended=bytes(image,movie);
+ result=inspect(ab(appended));assert.equal(result.kind,"motion");assert.equal(result.videoStart,image.length);assert.equal(result.stillEnd,image.length);
+ assert.deepEqual(inspect(ab(image)),{kind:"static"});
+ const fake=bytes(ftyp("heic"),box("meta",Buffer.alloc(12)),box("mdat",movie));
+ assert.notEqual(inspect(ab(fake)).kind,"motion","never search compressed primary image payload");
+ assert.equal(inspect(ab(bytes(image,box("mpvd",ftyp("qt  "),box("mdat",Buffer.from([1])))))).kind,"unknown");
+ assert.equal(inspect(ab(wrapped.subarray(0,wrapped.length-1))).kind,"unknown");
+ assert.notEqual(inspect(ab(movie)).kind,"motion");
+ const audio=bytes(ftyp("isom"),box("mdat",Buffer.from([1])),box("moov",box("trak",box("mdia",box("hdlr",Buffer.alloc(8),Buffer.from("soun"))))));
+ assert.notEqual(inspect(ab(bytes(image,box("mpvd",audio)))).kind,"motion");
+ const extended=Buffer.alloc(16);extended.writeUInt32BE(1);extended.write("mpvd",4);extended.writeBigUInt64BE(BigInt(movie.length+16),8);
+ const wide=bytes(image,extended,movie);result=inspect(ab(wide));assert.equal(result.kind,"motion");assert.equal(result.videoStart,image.length+16)
+})
+
+test("HEIC Live badge and player are lazy, use local assets and preserve existing gestures",()=>{
+ assert.match(galleryJs,/function isMotionCandidate/);
+ assert.match(galleryJs,/addLiveBadge\(media,f,directoryLiveMap\.has\(f.name\)\)/);
+ assert.match(galleryJs,/addLiveBadge\(tile,f\)/);
+ assert.match(galleryJs,/addLiveBadge\(b,cover\)/);
+ assert.match(galleryJs,/inspectEmbeddedMotion\(original\)/);
+ assert.match(galleryJs,/original\.slice\(motion\.videoStart,motion\.videoEnd\)/);
+ assert.match(galleryJs,/decodeCompatibleImage\(f,url,compat,signal,preparedBytes\)/);
+ assert.match(galleryJs,/\/gallery-codecs\/livephotoskit-1\.5\.6\.js/);
+ assert.match(galleryJs,/player\.videoSrc=pair\.bytes/);
+ assert.match(galleryJs,/player\.showsNativeControls=false/);
+ assert.match(galleryJs,/player\.playbackStyle=kit\.PlaybackStyle\.FULL/);
+ assert.match(galleryJs,/if\(photoZoom\.hold&&stop&&livePlaying\)stopLive\(\)/);
+ assert.match(galleryJs,/cancelPhotoHold\(\);if\(livePlaying\)stopLive\(\)/);
+ assert.match(galleryCss,/\.preview \.stage>\.live-kit\{[^}]*pointer-events:none/);
+ assert.doesNotThrow(()=>new Script(galleryJs))
 })

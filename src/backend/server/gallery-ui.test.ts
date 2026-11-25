@@ -147,7 +147,8 @@ test("focal point zoom math and bounded panning",()=>{
 
 test("pinch is the only touch zoom; scale always returns continuously to fit",()=>{
  assert.ok(!galleryJs.includes("togglePhotoZoomAt"))
- assert.ok(!galleryJs.includes("z.tap"))
+ // The legacy gesture cleanup still clears an unused tap field; this must not be mistaken for active tap-to-zoom.
+ assert.doesNotMatch(galleryJs.replace(/z\.tap\s*=\s*null/g,""),/\bz\.tap\b/)
  assert.ok(!galleryJs.includes("img.ondblclick"))
  assert.ok(galleryJs.includes("photoPinchScale(a.s,a.distance,distance)"))
  assert.doesNotThrow(()=>new Script(galleryJs))
@@ -211,4 +212,20 @@ test("timeline append keeps the existing rows and viewport while a new page is i
  h.finish({items:[{id:"a"},{id:"b"},{id:"c"}],next:{key:"2026-11-23",fid:"c"}})
  await pending
  assert.deepEqual(h.snapshot(),{ids:["a","b","c"],next:{key:"2026-11-23",fid:"c"},loading:false,scroll:850,rendered:1,resets:1,scheduled:1,calls:[850]})
+})
+
+
+test("appending across a partial date row never moves already loaded photos",()=>{
+ const a=galleryJs.indexOf("function makeRows("),b=galleryJs.indexOf("function renderTimelineWindow(",a)
+ assert.ok(a>=0&&b>a)
+ const layout=new Function('let memPageItems=[],memSort="new",cols=3;function gridColumns(){return cols};'+galleryJs.slice(a,b)+';return (items,c,width)=>{memPageItems=items;cols=c;return makeRows(width)}')()
+ const first=Array.from({length:48},(_,i)=>({id:String(i),day:i<46?"2026-11-24":"2026-11-23"}))
+ const next=Array.from({length:48},(_,i)=>({id:String(i+48),day:i<16?"2026-11-23":"2026-11-22"}))
+ for(const [cols,width] of [[1,390],[2,390],[3,390],[4,390],[6,390],[16,1440]]){
+  const old=layout(first,cols,width),fresh=layout(first.concat(next),cols,width)
+  const positions=(p:any)=>Object.fromEntries(p.rows.flatMap((r:any)=>(r.items||[]).map((f:any)=>[f.id,r.top])))
+  const previous=positions(old),current=positions(fresh)
+  for(const id of Object.keys(previous))assert.equal(current[id],previous[id])
+  assert.ok(fresh.height>old.height)
+ }
 })

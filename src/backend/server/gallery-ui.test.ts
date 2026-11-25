@@ -352,7 +352,7 @@ test("Live surface exactly matches portrait and landscape photo geometry at fit 
  const start=galleryJs.slice(galleryJs.indexOf("function startLive("),galleryJs.indexOf('$("liveButton").onclick='))
  assert.doesNotMatch(start,/settlePhotoZoom\(1|scale\s*=\s*1/)
  const down=galleryJs.slice(galleryJs.indexOf('photoStage.addEventListener("pointerdown"'),galleryJs.indexOf('photoStage.addEventListener("pointermove"'))
- assert.match(down,/livePartner&&photoContainsPoint/)
+ assert.match(down,/fileKind\(selected\)==="image"&&livePartner&&photoContainsPoint/)
  assert.doesNotMatch(down,/scale<=1\.01|scale>1\.01/)
 })
 
@@ -400,5 +400,23 @@ test("private thumbnail cache is identity-keyed, opt-in per visible tile and gra
  assert.match(galleryCss,/\.gallery-thumb\{opacity:0!important/)
  assert.match(galleryCss,/\.gallery-thumb\.loaded\{opacity:1!important/)
  assert.match(galleryCss,/\.thumb-placeholder\[data-thumb-tone="3"\]/)
+ assert.doesNotThrow(()=>new Script(galleryJs))
+})
+
+
+test("standalone video shares focal zoom geometry while playback controls remain outside the stage",()=>{
+ assert.match(galleryHtml,/id="stage" class="stage"><\/div>.*id="videoControls"/)
+ assert.match(galleryHtml,/id="videoSeek" type="range"/)
+ assert.match(galleryJs,/\["image","video"\]\.includes\(fileKind\(selected\)\)/)
+ assert.match(galleryJs,/video\.videoWidth\/video\.videoHeight/)
+ assert.match(galleryJs,/:scope>video\.preview-full/)
+ assert.match(galleryJs,/media\.controls=kind==="music"/)
+ assert.match(galleryJs,/bindPreviewVideo\(media\);photoImageReady\(\);await setVideoSource/)
+ assert.match(galleryJs,/function clearStage\(\)\{unbindPreviewVideo\(\);resetPhotoZoom/)
+ assert.match(galleryJs,/!a\.moved&&!a\.noTap/)
+ assert.match(galleryJs,/media\.currentTime=Number\(seek\.value\)\/1000\*media\.duration/)
+ assert.match(galleryJs,/media\.controls=true;media\.classList\.add\("native-fullscreen"\)/)
+ assert.match(galleryCss,/\.preview \.stage\.photo-gesture>video\.preview-full\{[^}]*pointer-events:none/)
+ assert.match(galleryCss,/\.video-controls\[hidden\][^{]*\{display:none!important/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })

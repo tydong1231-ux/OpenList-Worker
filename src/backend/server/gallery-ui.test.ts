@@ -341,13 +341,49 @@ test("Live surface exactly matches portrait and landscape photo geometry at fit 
   }
  }
  const g={fw:300,fh:400}
- assert.ok(math.liveKitMatchesPhoto({videoWidth:1920,videoHeight:1440,videoRotation:270},g))
- assert.ok(math.liveKitMatchesPhoto({videoWidth:1440,videoHeight:1920,videoRotation:0},g))
- assert.equal(math.liveKitMatchesPhoto({videoWidth:1920,videoHeight:1440,videoRotation:0},g),false)
- assert.equal(math.liveKitMatchesPhoto({videoWidth:1440,videoHeight:1920,videoRotation:0},{fw:225,fh:400}),false)
+ const portrait={video:{videoWidth:1440,videoHeight:1920},videoRotation:0},safe={kitSafe:true}
+ assert.ok(math.liveKitMatchesPhoto(portrait,g,safe))
+ assert.equal(math.liveKitMatchesPhoto(portrait,g,{kitSafe:false}),false)
+ assert.equal(math.liveKitMatchesPhoto(portrait,g,{}),false)
+ assert.equal(math.liveKitMatchesPhoto({...portrait,videoRotation:270},g,safe),false)
+ assert.equal(math.liveKitMatchesPhoto({...portrait,videoRotation:180},g,safe),false)
+ assert.equal(math.liveKitMatchesPhoto({video:{videoWidth:1920,videoHeight:1440}},g,safe),false)
+ assert.equal(math.liveKitMatchesPhoto(portrait,{fw:225,fh:400},safe),false)
  const start=galleryJs.slice(galleryJs.indexOf("function startLive("),galleryJs.indexOf('$("liveButton").onclick='))
  assert.doesNotMatch(start,/settlePhotoZoom\(1|scale\s*=\s*1/)
  const down=galleryJs.slice(galleryJs.indexOf('photoStage.addEventListener("pointerdown"'),galleryJs.indexOf('photoStage.addEventListener("pointermove"'))
  assert.match(down,/livePartner&&photoContainsPoint/)
  assert.doesNotMatch(down,/scale<=1\.01|scale>1\.01/)
+})
+
+
+test("MOV orientation matrices select native rendering for rotated, mirrored, auxiliary and unknown tracks",()=>{
+ const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("let livePartner=",a)
+ const parse=new Function(galleryJs.slice(a,b)+";return motionMovie")()
+ const box=(type:string,...parts:Buffer[])=>{const payload=Buffer.concat(parts),h=Buffer.alloc(8);h.writeUInt32BE(payload.length+8);h.write(type,4,"ascii");return Buffer.concat([h,payload])}
+ const identity=[65536,0,0,0,65536,0,0,0,1073741824]
+ const r90=[0,65536,0,-65536,0,0,1440*65536,0,1073741824]
+ const r180=[-65536,0,0,0,-65536,0,1920*65536,1440*65536,1073741824]
+ const r270=[0,-65536,0,65536,0,0,0,1920*65536,1073741824]
+ const mirror=[-65536,0,0,0,65536,0,1920*65536,0,1073741824]
+ const header=(type:string,matrix:number[],v=0,enabled=true)=>{const offset=(type==="tkhd"?40:36)+(v===1?12:0),p=Buffer.alloc(offset+44);p[0]=v;p[3]=enabled?1:0;matrix.forEach((n,i)=>p.writeInt32BE(n,offset+i*4));return box(type,p)}
+ const track=(kind:string,matrix:number[]=identity,v=0,enabled=true)=>box("trak",header("tkhd",matrix,v,enabled),box("mdia",box("hdlr",Buffer.alloc(8),Buffer.from(kind),Buffer.alloc(12))))
+ const movie=(tracks:Buffer[],matrix:number[]=identity,v=0)=>Buffer.concat([box("ftyp",Buffer.from("qt  "),Buffer.alloc(4)),box("mdat",Buffer.alloc(8)),box("moov",header("mvhd",matrix,v),...tracks)])
+ const safe=(buf:Buffer)=>{const bytes=Uint8Array.from(buf).buffer;const result=parse(new DataView(bytes),0,bytes.byteLength);assert.ok(result);return result.kitSafe}
+ assert.equal(safe(movie([track("vide")])),true)
+ assert.equal(safe(movie([track("vide",identity,1)],identity,1)),true)
+ assert.equal(safe(movie([track("vide"),track("soun"),track("meta")])),true)
+ for(const matrix of [r90,r180,r270,mirror]){
+  assert.equal(safe(movie([track("vide",matrix)])),false)
+  assert.equal(safe(movie([track("vide",matrix,1)],identity,1)),false)
+  assert.equal(safe(movie([track("vide")],matrix)),false)
+ }
+ assert.equal(safe(movie([track("vide"),track("auxv",r90,0,false)])),false)
+ assert.equal(safe(movie([track("vide"),track("vide")])),false)
+ assert.equal(safe(movie([track("vide",identity,0,false)])),false)
+ const missing=box("trak",box("mdia",box("hdlr",Buffer.alloc(8),Buffer.from("vide"))))
+ assert.equal(safe(movie([missing])),false)
+ assert.equal(safe(movie([track("vide",identity,2)])),false)
+ assert.match(galleryJs,/pair\.kitSafe!==true\|\|livePlayer/)
+ assert.match(galleryJs,/kitSafe:motion\.kitSafe===true/)
 })

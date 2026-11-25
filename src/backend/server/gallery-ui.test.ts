@@ -86,14 +86,14 @@ test("gallery install assets use dedicated same-origin manifest and network-only
 })
 
 
-test("compact album keeps sync in menu, sticky filters, saved five-stage grid and live badges",()=>{
+test("compact album keeps sync in menu, sticky filters, saved five-stage grid and clean thumbnails",()=>{
  assert.match(galleryHtml,/id="menu".*id="albumMenuSync".*id="memorySync"/)
  assert.doesNotMatch(galleryHtml,/<h2>回忆 <span>Memories/)
  assert.match(galleryCss,/\.albumfilters\{position:sticky;top:var\(--gallery-top-height/)
  assert.match(galleryJs,/store\("gallery-media-density",value\)/)
  assert.match(galleryJs,/\[1,2,3,4,6\]/)
  assert.match(galleryJs,/memoryPullDistance>=110/)
- assert.match(galleryJs,/if\(f.kind==="image"\)addLiveBadge\(b,f\)/)
+ assert.doesNotMatch(galleryJs,/addLiveBadge\(/)
  assert.doesNotMatch(galleryJs,/已加载 "\+memPageItems/)
  assert.doesNotThrow(()=>new Script(galleryJs))
 })
@@ -232,7 +232,7 @@ test("appending across a partial date row never moves already loaded photos",()=
 
 
 test("HEIC embedded motion supports standard mpvd and concatenated MOV, not static HEIC or fake signatures",()=>{
- const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("const motionStatuses=",a);
+ const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("let livePartner=",a);
  assert.ok(a>=0&&b>a);
  const inspect=new Function(galleryJs.slice(a,b)+";return inspectEmbeddedMotion")();
  const bytes=(...parts:Buffer[])=>Buffer.concat(parts);
@@ -265,11 +265,10 @@ test("HEIC embedded motion supports standard mpvd and concatenated MOV, not stat
  result=inspect(ab(bytes(idatStill,box("mpvd",movie))));assert.equal(result.kind,"motion");assert.equal(result.stillEnd,idatStill.length)
 })
 
-test("HEIC Live badge and player are lazy, use local assets and preserve existing gestures",()=>{
- assert.match(galleryJs,/function isMotionCandidate/);
- assert.match(galleryJs,/addLiveBadge\(media,f,directoryLiveMap\.has\(f.name\)\)/);
- assert.match(galleryJs,/addLiveBadge\(tile,f\)/);
- assert.match(galleryJs,/addLiveBadge\(b,cover\)/);
+test("HEIC motion detection remains lazy, with LIVE only in the photo viewer",()=>{
+ assert.doesNotMatch(galleryJs,/addLiveBadge|motionBadgeState/);
+ assert.doesNotMatch(galleryCss,/live-tile-badge/);
+ assert.match(galleryHtml,/id="liveButton"/);
  assert.match(galleryJs,/inspectEmbeddedMotion\(original\)/);
  assert.match(galleryJs,/original\.slice\(motion\.videoStart,motion\.videoEnd\)/);
  assert.match(galleryJs,/decodeCompatibleImage\(f,url,compat,signal,preparedBytes\)/);
@@ -279,29 +278,15 @@ test("HEIC Live badge and player are lazy, use local assets and preserve existin
  assert.match(galleryJs,/player\.playbackStyle=kit\.PlaybackStyle\.FULL/);
  assert.match(galleryJs,/if\(photoZoom\.hold&&stop&&livePlaying\)stopLive\(\)/);
  assert.match(galleryJs,/cancelPhotoHold\(\);if\(livePlaying\)stopLive\(\)/);
- assert.match(galleryCss,/\.preview \.stage>\.live-kit\{[^}]*pointer-events:none/);
+ assert.match(galleryCss,/\.preview \.stage>\.live-surface\{[^}]*pointer-events:none/);
+ assert.match(galleryCss,/\.stage \.live-video\{[^}]*object-fit:cover/);
  assert.doesNotThrow(()=>new Script(galleryJs))
-})
-
-
-test("motion badges distinguish tentative HEICs, confirmed motion and static stills without fetching",()=>{
- const a=galleryJs.indexOf("const motionStatuses="),b=galleryJs.indexOf("let livePartner=",a);
- assert.ok(a>=0&&b>a);
- const logic=new Function('const path="/album",child=(p,n)=>p+"/"+n;const document={querySelectorAll:()=>[]};'+galleryJs.slice(a,b)+';return {motionBadgeState,updateMotionBadges}')();
- const f={id:"x",name:"IMG_1.HEIC",size:4000000,day:"2026-11-24"};
- assert.equal(logic.motionBadgeState(f),"candidate");
- logic.updateMotionBadges(f,"motion");assert.equal(logic.motionBadgeState({...f}),"confirmed");
- assert.equal(logic.motionBadgeState({...f,size:5000000}),"candidate");
- const g={...f,id:"y"};
- logic.updateMotionBadges(g,"static");assert.equal(logic.motionBadgeState(g),"");
- assert.equal(logic.motionBadgeState(g,true),"paired");
- assert.equal(logic.motionBadgeState({id:"jpg",name:"still.jpg"}),"")
 })
 
 test("release invalidates pending native playback and revokes embedded media when switching",async()=>{
  const a=galleryJs.indexOf("let livePartner="),b=galleryJs.indexOf("// Gesture math is independent",a);
  assert.ok(a>=0&&b>a);
- const setup='let selected={name:"a.HEIC"},previewGeneration=1,previewAbort={signal:{aborted:false}},photoZoom={scale:1};const revoked=[],created=[],events=[];const nodes={liveButton:{hidden:true,disabled:false,setAttribute(){}},previewHint:{},stage:{classList:{add(){},remove(){}},append(n){created.push(n)}}};const $=k=>nodes[k];const document={addEventListener(){},createElement(){return {canPlayType:()=> "maybe"}}};const window={addEventListener(){}};const URL={createObjectURL:()=>"blob:live-test",revokeObjectURL:v=>revoked.push(v)};function el(){return {setAttribute(){},classList:{add(){}},pause(){events.push("pause")},removeAttribute(){},load(){},remove(){events.push("remove")},play(){events.push("play");return Promise.resolve()}}}let resolveLink;const resolveMediaLink=()=>new Promise(r=>resolveLink=r);';
+ const setup='let selected={name:"a.HEIC"},previewGeneration=1,previewAbort={signal:{aborted:false}},photoZoom={scale:3,x:40,y:-80};const revoked=[],created=[],events=[];const nodes={liveButton:{hidden:true,disabled:false,setAttribute(){}},previewHint:{},stage:{classList:{add(){},remove(){}},append(){}}};const $=k=>nodes[k];const document={addEventListener(){},createElement(){return {canPlayType:()=> "maybe"}}};const window={addEventListener(){}};const URL={createObjectURL:()=>"blob:live-test",revokeObjectURL:v=>revoked.push(v)};const photoGeometry=()=>({w:400,h:800,fw:400,fh:700});const photoTransform=z=>"scale("+z.scale+")";const stopPhotoMotion=()=>{};const renderPhotoZoom=()=>{};function el(tag){return {style:{},setAttribute(){},classList:{add(){},remove(){}},append(n){created.push(n)},pause(){events.push("pause")},removeAttribute(){},load(){},remove(){events.push("remove")},play(){events.push("play");return Promise.resolve()}}}let resolveLink;const resolveMediaLink=()=>new Promise(r=>resolveLink=r);';
  const h=new Function(setup+galleryJs.slice(a,b)+';return {reveal:revealLive,start:startLive,stop:stopLive,reset:resetLive,resolve:v=>resolveLink(v),events,created,revoked}')();
  h.reveal({full_path:"/clip.mov"});h.start(true);h.stop();h.resolve("https://example.test/movie.mov");await Promise.resolve();await Promise.resolve();
  assert.equal(h.created.length,0,"released hold cannot attach stale MOV");
@@ -311,7 +296,7 @@ test("release invalidates pending native playback and revokes embedded media whe
 
 
 test("Quark actual LIVP layout: little endian uuid header and redundant 12 byte footer",()=>{
- const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("const motionStatuses=",a)
+ const a=galleryJs.indexOf("function motionBox("),b=galleryJs.indexOf("let livePartner=",a)
  const inspect=new Function(galleryJs.slice(a,b)+";return inspectEmbeddedMotion")()
  const box=(type:string,...parts:Buffer[])=>{const payload=Buffer.concat(parts),h=Buffer.alloc(8);h.writeUInt32BE(payload.length+8);h.write(type,4,"ascii");return Buffer.concat([h,payload])}
  const ftyp=(brand:string)=>box("ftyp",Buffer.from(brand),Buffer.alloc(4),Buffer.from(brand))
@@ -336,4 +321,33 @@ test("indexed thumbnail recovery is lazy and shared for photos and videos",()=>{
  assert.match(galleryJs,/galleryThumbObserver\.observe\(img\)/)
  assert.match(galleryJs,/if\(!video.videoWidth\|\|!video.videoHeight\)/)
  assert.doesNotThrow(()=>new Script(galleryJs))
+})
+
+
+test("Live surface exactly matches portrait and landscape photo geometry at fit and panned zoom",()=>{
+ const l=galleryJs.indexOf("function liveSurfaceLayout("),le=galleryJs.indexOf("function ensureLiveSurface(",l)
+ const p=galleryJs.indexOf("function photoTransform("),pe=galleryJs.indexOf("function renderPhotoZoom(",p)
+ const k=galleryJs.indexOf("function liveKitMatchesPhoto("),ke=galleryJs.indexOf("function stopLive(",k)
+ const math=new Function(galleryJs.slice(l,le)+galleryJs.slice(p,pe)+galleryJs.slice(k,ke)+";return {liveSurfaceLayout,photoTransform,photoContainsPoint,liveKitMatchesPhoto}")()
+ for(const [w,h,ratio] of [[390,680,9/16],[390,680,3/4],[390,680,16/9],[800,390,9/16],[800,390,16/9]]){
+  const fw=Math.min(w,h*ratio),fh=Math.min(h,w/ratio),g={w,h,fw,fh,cx:w/2,cy:h/2}
+  for(const z of [{scale:1,x:0,y:0},{scale:3,x:40,y:-75},{scale:5,x:-130,y:92}]){
+   const r=math.liveSurfaceLayout(g,z)
+   assert.ok(Math.abs(r.width/r.height-ratio)<1e-8)
+   assert.equal(r.left+r.width/2,w/2);assert.equal(r.top+r.height/2,h/2)
+   assert.equal(r.transform,math.photoTransform(z))
+   assert.ok(math.photoContainsPoint(g,z,{x:g.cx+z.x,y:g.cy+z.y}))
+   assert.equal(math.photoContainsPoint(g,z,{x:g.cx+z.x+fw*z.scale/2+1,y:g.cy+z.y}),false)
+  }
+ }
+ const g={fw:300,fh:400}
+ assert.ok(math.liveKitMatchesPhoto({videoWidth:1920,videoHeight:1440,videoRotation:270},g))
+ assert.ok(math.liveKitMatchesPhoto({videoWidth:1440,videoHeight:1920,videoRotation:0},g))
+ assert.equal(math.liveKitMatchesPhoto({videoWidth:1920,videoHeight:1440,videoRotation:0},g),false)
+ assert.equal(math.liveKitMatchesPhoto({videoWidth:1440,videoHeight:1920,videoRotation:0},{fw:225,fh:400}),false)
+ const start=galleryJs.slice(galleryJs.indexOf("function startLive("),galleryJs.indexOf('$("liveButton").onclick='))
+ assert.doesNotMatch(start,/settlePhotoZoom\(1|scale\s*=\s*1/)
+ const down=galleryJs.slice(galleryJs.indexOf('photoStage.addEventListener("pointerdown"'),galleryJs.indexOf('photoStage.addEventListener("pointermove"'))
+ assert.match(down,/livePartner&&photoContainsPoint/)
+ assert.doesNotMatch(down,/scale<=1\.01|scale>1\.01/)
 })

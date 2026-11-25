@@ -24,6 +24,8 @@ export class DriverQuarkUcTv implements StorageDriver {
     await this.client.init()
   }
 
+  async verifyAccountIdentity():Promise<string|null>{return this.client.verifyLogin()}
+
   private fileToItem(f: QuarkTvFile): FileItem {
     const isDir = f.isdir === 1
     return {

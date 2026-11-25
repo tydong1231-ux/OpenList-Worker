@@ -17,3 +17,11 @@ Browser native media support determines compatible formats and seek support. Uns
 - Default chronological browsing, covers, random memories, anniversaries and Live Photo lookup use the existing indexes. Month/count summaries are persisted by scheduled work at most every two hours when the index changes (first summary is populated by a regular scheduled run). The UI marks counts as approximate and indicates when a summary is pending.
 - Substring search and non-default sorts can still scan wider ranges. They have a separate shared 500,000-row daily estimated allowance; once depleted, default chronological browsing and month filters remain available. Allowances reset at UTC midnight and are app-level safeguards, not a guarantee against unrelated D1 account activity or unreported D1 metadata.
 - The local SQLite regression checks query plans, live-photo uniqueness, stale lease rejection and summary refresh fencing without accessing a production database.
+
+
+## Durable gallery identity across TV reauthorization
+
+- The gallery namespace is tied to a verified upstream account and the original mount generation, not its refreshed authorization timestamp. Existing data is adopted without copying or rewriting any gallery rows. ACL exclusions and OpenList owner identity remain part of the scope.
+- Scheduled work pins the existing account using authenticated TV user information before reauthorization is needed. The dedicated QR setup flow also attempts this if the old credentials are still valid. Only explicit upstream account identifiers are accepted; nicknames, device IDs and tokens never establish identity.
+- Same-account QR reauthorization creates a small version binding to the original scope before saving new credentials, keeping the state, queue, statistics, tags and thumbnails in place. A different or unverifiable account is rejected without replacing the existing mount. Other mount paths and generic storage edits are not treated as verified reauthorization; use the dedicated QR page for this gallery.
+- If upstream stops returning a stable account ID before the first successful pin, the old index remains intact but safe automatic reattachment cannot be guaranteed. Do not delete/recreate the mount. No production sign-out is required to adopt the existing index.

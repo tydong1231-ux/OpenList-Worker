@@ -5,6 +5,10 @@ import type { DriverQuarkUcTvAddition } from "../drivers/quark_uc_tv/types"
 import { getDb, saveDb, isEncryptionReady } from "../internal/model/db"
 import { getJwtSecret } from "./middlewares"
 import { sha256 } from "../pkg/crypto"
+import { getDriver } from "../internal/op/storage"
+import { DriverQuarkUcTv } from "../drivers/quark_uc_tv/driver"
+import { GALLERY_ROOT } from "./gallery-memory-model"
+import { readGalleryMountIdentity, pinGalleryMountIdentity, linkGalleryMountIdentity } from "./gallery-mount-identity"
 
 type State = { path: string; deviceId: string; queryToken: string; exp: number; allowInsecureTokenHttp?: boolean; owner: string; existingId?: number; existingModified?: string }
 const enc = new TextEncoder()
@@ -105,6 +109,23 @@ quarkTvSetupRouter.post("/start", async (c) => {
   if (existing && (!isTv(existing) || body.reauthorize !== true)) {
     return c.json({ code: 409, message: "挂载路径已存在，请换一个路径；仅夸克 TV 挂载可以重新授权。" }, 409)
   }
+  // Only the dedicated same-account QR flow can inherit a gallery namespace.
+  // Establish the old identity BEFORE asking for a new authorization.
+  if(existing&&path===GALLERY_ROOT&&c.env?.DB){
+    try{
+      let binding=await readGalleryMountIdentity(c.env.DB,existing)
+      if(!binding){
+        const driver=await getDriver(existing.driver,existing)
+        if(driver instanceof DriverQuarkUcTv){
+          const accountHash=await driver.verifyAccountIdentity()
+          if(accountHash)binding=await pinGalleryMountIdentity(c.env.DB,existing,accountHash)
+        }
+      }
+      if(!binding)return c.json({code:409,message:"无法验证原夸克账号身份，旧相册索引已保留。为避免串号，不会覆盖授权。请联系维护者。"},409)
+    }catch{
+      return c.json({code:409,message:"暂时无法确认原相册账号，索引仍保留；请勿删除挂载，稍后重试。"},409)
+    }
+  }
   let stage = "QR_REQUEST"
   try {
     const client = new ClientQuarkUcTv({ variant: "quark", refresh_token: "" })
@@ -132,9 +153,10 @@ quarkTvSetupRouter.post("/finish", async (c) => {
   if (!allowed(matches(before, state.path), state)) return c.json({ code: 409, message: "挂载配置已变化，请重新生成二维码。" }, 409)
   const addition: DriverQuarkUcTvAddition = { variant: "quark", refresh_token: "", device_id: state.deviceId, order_by: "file_name", order_direction: "asc", link_method: "download", allow_insecure_token_http: state.allowInsecureTokenHttp === true }
   const client = new ClientQuarkUcTv(addition)
+  let verifiedAccountHash:string|null=null
   try {
     await client.completeLogin(state.queryToken)
-    await client.verifyLogin()
+    verifiedAccountHash=await client.verifyLogin()
   } catch (e: any) {
     const reason = diagnostic(e, "QR_COMPLETE_FAILED")
     if (reason === "SCAN_PENDING") {
@@ -147,11 +169,35 @@ quarkTvSetupRouter.post("/finish", async (c) => {
   const db = await getDb(c.env)
   const existing = matches(db, state.path)
   if (!allowed(existing, state)) return c.json({ code: 409, message: "挂载配置已变化，请重新授权。" }, 409)
+  const previousModified=Date.parse(String(existing?.modified||""))
+  const modified=new Date(Math.max(Date.now(),Number.isFinite(previousModified)?previousModified+1:0)).toISOString()
+  // Preserve mount options on reauthorization; rotate only auth/device fields.
+  let savedAddition=addition
+  if(existing){
+    try{
+      const previous=typeof existing.addition==="string"?JSON.parse(existing.addition):existing.addition||{}
+      savedAddition={...previous,variant:"quark",refresh_token:addition.refresh_token,access_token:addition.access_token,device_id:addition.device_id,allow_insecure_token_http:addition.allow_insecure_token_http}
+    }catch{return c.json({code:409,message:"原挂载配置无法读取，未修改索引或授权。"},409)}
+  }
   const storage = {
-    ...(existing || { id: Math.max(0, ...(db.storages || []).map((s: any) => Number(s.id) || 0)) + 1, order: 0, remark: "", disable_index: false, enable_sign: true }),
-    mount_path: state.path, driver: "QuarkUcTv", addition: JSON.stringify(addition),
-    modified: new Date().toISOString(), status: "work", disabled: false,
-    web_proxy: false, webdav_policy: "302_redirect", down_proxy_url: "", disable_proxy_sign: false, seed_policy: "off",
+    ...(existing || { id: Math.max(0, ...(db.storages || []).map((s: any) => Number(s.id) || 0)) + 1, order: 0, remark: "", disable_index: false, enable_sign: true,web_proxy:false,webdav_policy:"302_redirect",down_proxy_url:"",disable_proxy_sign:false,seed_policy:"off" }),
+    mount_path: state.path, driver: "QuarkUcTv", addition: JSON.stringify(savedAddition),
+    modified, status: "work", disabled: false,
+  }
+  let indexPreserved=false
+  if(state.path===GALLERY_ROOT&&c.env?.DB){
+    // Write the version binding before publishing new credentials. A failed
+    // config save leaves only an unreachable binding, never a partially moved index.
+    try{
+      if(existing){
+        if(!verifiedAccountHash)return c.json({code:409,message:"夸克未返回可验证的账号 ID，未覆盖旧授权或索引。"},409)
+        await linkGalleryMountIdentity(c.env.DB,existing,storage,verifiedAccountHash)
+        indexPreserved=true
+      }else if(verifiedAccountHash)await pinGalleryMountIdentity(c.env.DB,storage,verifiedAccountHash)
+    }catch(e){
+      const mismatch=String((e as any)?.message||e).includes("GALLERY_ACCOUNT_MISMATCH")
+      return c.json({code:409,message:mismatch?"扫码账号与原相册账号不同，旧授权和索引均未修改。请使用原夸克账号。":"无法安全关联旧索引，授权未覆盖，数据仍然保留。"},409)
+    }
   }
   const old = [...(db.storages || [])]
   db.storages = existing ? old.map(s => s.id === existing.id ? storage : s) : [...old, storage]
@@ -162,5 +208,5 @@ quarkTvSetupRouter.post("/finish", async (c) => {
     return c.json({ code: 500, message: "授权成功但数据库保存失败，请重新扫码。" }, 500)
   }
   // No access or refresh token returned to the browser.
-  return c.json({ code: 200, message: "挂载成功", data: { mount_path: storage.mount_path, id: storage.id } })
+  return c.json({ code: 200, message: "挂载成功", data: { mount_path: storage.mount_path, id: storage.id, index_preserved:indexPreserved } })
 })

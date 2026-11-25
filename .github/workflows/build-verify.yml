@@ -69,7 +69,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Gallery UI, SQL and cron regression (local SQLite, no production D1)
-        run: pnpm exec tsx --test src/backend/server/gallery-ui.test.ts src/backend/server/gallery-cron.test.ts
+        run: pnpm exec tsx --test src/backend/server/gallery-ui.test.ts src/backend/server/gallery-cron.test.ts src/backend/server/gallery-mount-identity.test.ts src/backend/drivers/quark_uc_tv/login.test.ts
 
       - name: Fetch official frontend dist
         run: node scripts/fetch-frontend.mjs

@@ -71,6 +71,9 @@ jobs:
       - name: Gallery UI, SQL and cron regression (local SQLite, no production D1)
         run: pnpm exec tsx --test src/backend/server/gallery-ui.test.ts src/backend/server/gallery-cron.test.ts src/backend/server/gallery-mount-identity.test.ts src/backend/drivers/quark_uc_tv/login.test.ts
 
+      - name: Live Photo layout and touch gestures in headless Chromium
+        run: pnpm exec tsx scripts/test-gallery-live-browser.mjs
+
       - name: Fetch official frontend dist
         run: node scripts/fetch-frontend.mjs
 
